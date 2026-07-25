@@ -14,18 +14,28 @@
 - **实时监控**：基于 watchdog 监控多个目录（递归），支持：
   - 性能模式（inotify，本地磁盘）
   - 兼容模式（轮询，适用于 CD2 / rclone / SMB 等网络挂载）
-- **去抖处理**：新文件入队后延迟 5 秒处理，避免半写入状态
-- **全量扫描**："立即运行一次"开关对所有监控目录做一次 `*.strm` 全量刮削
-- **强制类型**：目录后拼接 `#电视剧` / `#电影` 强制指定媒体类型
-- **排除目录**、**覆盖模式** 可配置
+- **就地刮削、不转移**：发现 `.strm` 后只在它所在的当前目录（向上定位到剧集根目录）就地调用主程序刮削，**不移动/复制文件**。
+- **轻量去重**：同一剧集根目录 10 分钟内不重复刮削，避免一季多集落盘时整剧反复重刮。
+- **全量扫描**："立即运行一次"开关（或 `/strm_scan` API）对所有监控目录做一次 `*.strm` 全量刮削。
+- **排除关键词**、**覆盖模式** 可配置。
+
+## 实现说明（借鉴目录实时监控插件）
+
+整体流程与官方「目录实时监控」(`CloudLinkMonitor`) 一致，但去掉了转移/软链/Strm 联动等逻辑，只保留"监控→刮削"：
+
+- `__init__.py` 内 `_StrmHandler(FileSystemEventHandler)` 把 watchdog 的 `on_created` / `on_moved` 事件直接转给 `event_handler`。
+- `event_handler` 过滤 `.strm`、排除关键词、回收站/隐藏文件后，同步调用 `__scrape`。
+- `__scrape` 用主程序 `StorageChain().get_file_item(storage="local", path=目录)` 取得 `type=dir` 的文件项，再调用 `MediaChain().scrape_metadata(fileitem=目录, overwrite=...)`。
+- 不引入 APScheduler、去抖 worker 线程、单文件识别/取图等额外机制——刮削识别由主程序在目录刮削分支内部完成。
 
 ## 刮削链路
 
 ```
-watchdog 发现新 .strm
-  → 去抖 5s
-  → __find_scrape_target() 向上回退到剧集根目录
-      （电视剧：跳过 Season 1 / S01 / Specials 等季目录；电影：直接停在电影目录）
+watchdog 发现新 .strm（on_created / on_moved）
+  → event_handler 过滤 .strm / 排除关键词 / 回收站
+  → __series_root() 向上回退到剧集根目录
+      （电视剧：跳过 Season 1 / S01 / Specials / Extras 等季目录；电影：直接停在电影目录）
+  → storagechain.get_file_item(目录) → type=dir 文件项
   → MediaChain().scrape_metadata(fileitem=目录)   ← 与手动刮削目录同一入口
       → 主程序递归处理 + 初始化目录元数据
       → 写出 tvshow.nfo / poster / backdrop / logo / banner / thumb
@@ -35,7 +45,7 @@ watchdog 发现新 .strm
 
 ## 依赖
 
-无额外依赖。`watchdog`、`APScheduler`、`pytz` 均为主程序自带。
+无额外依赖。`watchdog` 为主程序自带（与目录实时监控插件共用同一套机制）。
 
 ## 配置项
 
@@ -45,5 +55,5 @@ watchdog 发现新 .strm
 | 立即全量扫描一次 | 对监控目录内所有 .strm 全量刮削一次 |
 | 覆盖已有元数据 | 对应 scrape_metadata 的 overwrite 参数 |
 | 监控模式 | 性能模式（inotify）/ 兼容模式（轮询） |
-| 监控目录 | 每行一个，支持 `路径#电视剧` 强制类型 |
-| 排除目录 | 每行一个 |
+| 监控目录 | 每行一个目录 |
+| 排除关键词 | 每行一个（正则），匹配的路径不刮削 |
