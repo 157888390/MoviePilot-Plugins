@@ -4,9 +4,10 @@
 
 ## 设计原则
 
-1. **刮削完全走本体**：插件只负责"发现文件 + 识别媒体"，实际刮削通过 `MediaChain().scrape_metadata()` 完成——这与 UI 手动刮削、文件整理后自动刮削、工作流"刮削文件"动作是**同一个入口**。
+1. **刮削完全走本体**：插件只负责"发现 `.strm` + 定位剧集根目录"，实际刮削通过 `MediaChain().scrape_metadata(fileitem=目录)` 完成——这与 UI 手动刮削目录、文件整理后自动刮削、工作流"刮削文件"动作是**同一个入口**。
 2. **记录统一由本体管理**：NFO 文件、海报图片、刮削历史等全部由主程序生成和管理，插件自身不落任何元数据、不维护私有刮削记录，与其他方式触发的刮削记录保持完全一致。
-3. **`.strm` 是本体一等公民**：`.strm` 位于主程序 `settings.RMT_MEDIAEXT` 媒体扩展名白名单中，`scrape_metadata` 原生支持。
+3. **按"目录"刮削才能出完整产物**：主程序对**单文件**刮削（`_handle_tv_episode_file`）只写单集 `.nfo`/单集图，**不会**写 `tvshow.nfo`、也不会下载 `poster/backdrop/logo/banner/thumb/season01-poster`、`Season 1/season.nfo`；只有对**目录**刮削（`_handle_tv_directory`）才会产出上述剧集级文件。因此本插件在发现 `.strm` 后会向上回退到剧集根目录，对该目录整体刮削，从而与本体手动刮削产物完全一致。
+4. **`.strm` 是本体一等公民**：`.strm` 位于主程序 `settings.RMT_MEDIAEXT` 媒体扩展名白名单中，`scrape_metadata` 原生支持。
 
 ## 功能
 
@@ -23,11 +24,13 @@
 ```
 watchdog 发现新 .strm
   → 去抖 5s
-  → MetaInfoPath 解析文件名元数据
-  → chain.recognize_media() 识别（主程序识别链，含缓存/站点辅助）
-  → chain.obtain_images() 获取图片
-  → MediaChain().scrape_metadata(fileitem=...)   ← 与手动刮削同一入口
-      → 主程序生成 NFO / 下载图片 / 管理记录
+  → __find_scrape_target() 向上回退到剧集根目录
+      （电视剧：跳过 Season 1 / S01 / Specials 等季目录；电影：直接停在电影目录）
+  → MediaChain().scrape_metadata(fileitem=目录)   ← 与手动刮削目录同一入口
+      → 主程序递归处理 + 初始化目录元数据
+      → 写出 tvshow.nfo / poster / backdrop / logo / banner / thumb
+              / season01-poster.jpg / Season 1/season.nfo + 各单集 .nfo/.jpg
+      → 记录管理全部由本体负责
 ```
 
 ## 依赖

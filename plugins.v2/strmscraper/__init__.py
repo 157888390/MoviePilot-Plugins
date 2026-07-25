@@ -13,7 +13,7 @@ from watchdog.observers.polling import PollingObserver
 from app import schemas
 from app.chain.media import MediaChain
 from app.core.config import settings
-from app.core.metainfo import MetaInfoPath
+from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import MediaType
@@ -189,16 +189,23 @@ class StrmScraper(_PluginBase):
 
     def enqueue_file(self, file_path: str):
         """
-        watchdog 回调入口：过滤后加入待处理队列
+        watchdog 回调入口：过滤后，找到应刮削的剧集根目录并加入待处理队列
         """
         if not file_path or not file_path.lower().endswith(".strm"):
             return
-        if self.__is_excluded(Path(file_path)):
+        fp = Path(file_path)
+        if self.__is_excluded(fp):
             logger.debug(f"{file_path} 在排除目录中，跳过")
             return
+        # 关键：只对“目录”刮削，才能让主程序写出 tvshow.nfo / poster /
+        # backdrop / logo / season.nfo 等剧集级文件（与手动刮削目录一致）。
+        # 单文件刮削(_handle_tv_episode_file)只会出单集 .nfo，缺上述文件。
+        target = self.__find_scrape_target(fp)
+        if not target:
+            return
         with self._pending_lock:
-            self._pending[file_path] = time.time()
-        logger.info(f"发现新STRM文件，加入刮削队列：{file_path}")
+            self._pending[str(target)] = time.time()
+        logger.info(f"发现新STRM，加入刮削队列（目录）：{target}")
 
     def __consume_loop(self):
         """
@@ -216,7 +223,7 @@ class StrmScraper(_PluginBase):
                 if self._event.is_set():
                     return
                 try:
-                    self.__scrape_strm(Path(path))
+                    self.__scrape_target(Path(path))
                 except Exception as e:
                     logger.error(f"刮削 {path} 出错：{str(e)}")
             self._event.wait(2)
@@ -248,55 +255,76 @@ class StrmScraper(_PluginBase):
     # ------------------------------------------------------------------
     # 刮削实现：全部交给主程序 MediaChain，本插件不落任何元数据
     # ------------------------------------------------------------------
-    def __scrape_strm(self, file_path: Path):
-        if not file_path.exists():
-            logger.warning(f"STRM文件已不存在，跳过：{file_path}")
+    @staticmethod
+    def __find_scrape_target(file_path: Path) -> Optional[Path]:
+        """
+        从 .strm 文件向上找到应刮削的“根目录”：
+        - 电视剧：向上跳过季目录(Season 1 / S01 / Specials 等)，停在剧集根目录，
+          这样主程序会写 tvshow.nfo + poster/backdrop/logo/banner/thumb/season01-poster
+          + Season1/season.nfo，与手动刮削目录完全一致。
+        - 电影：电影目录名不是季目录，直接停在电影所在目录。
+        最多向上 3 层，防止异常路径无限上溯。
+        """
+        current = file_path.parent
+        for _ in range(3):
+            name = current.name
+            is_season = (
+                name in settings.RENAME_FORMAT_S0_NAMES
+                or MetaInfo(name).begin_season is not None
+            )
+            if not is_season:
+                break
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return current
+
+    def __scrape_target(self, dir_path: Path):
+        if not dir_path.exists():
+            logger.warning(f"刮削目标目录已不存在，跳过：{dir_path}")
             return
-        # 识别媒体信息（走主程序识别链，含缓存与站点辅助识别）
-        meta = MetaInfoPath(file_path)
-        forced_type = self.__forced_type(file_path)
-        if forced_type:
-            meta.type = forced_type
-        mediainfo = self.chain.recognize_media(meta=meta)
-        if not mediainfo:
-            logger.warn(f"未识别到媒体信息，无法刮削：{file_path}")
-            return
-        # 补齐图片信息
-        self.chain.obtain_images(mediainfo)
-        # 调用主程序刮削链。与手动刮削/整理刮削完全同一入口，
+        # 调用主程序刮削链，对“目录”刮削。与手动刮削/整理刮削完全同一入口，
         # NFO、图片、刮削记录均由主程序统一生成和管理。
+        # 传目录(而非单文件)是补齐 tvshow.nfo / poster / backdrop / logo 的关键。
         MediaChain().scrape_metadata(
             fileitem=schemas.FileItem(
                 storage="local",
-                type="file",
-                path=str(file_path).replace("\\", "/"),
-                name=file_path.name,
-                basename=file_path.stem,
-                extension=file_path.suffix[1:],
-                modify_time=file_path.stat().st_mtime,
+                type="dir",
+                path=str(dir_path).replace("\\", "/"),
+                name=dir_path.name,
+                basename=dir_path.stem,
+                extension="",
+                modify_time=dir_path.stat().st_mtime,
             ),
-            meta=meta,
-            mediainfo=mediainfo,
             overwrite=self._overwrite,
         )
-        logger.info(f"STRM刮削完成（由主程序处理）：{file_path}")
+        logger.info(f"STRM目录刮削完成（由主程序处理）：{dir_path}")
 
     def full_scan(self):
         """
-        全量扫描监控目录中的所有 strm 文件并刮削
+        全量扫描监控目录中的所有 strm 文件，按“剧集根目录”去重后刮削
         """
         for path, _ in self.__parse_paths():
             logger.info(f"开始全量扫描：{path}")
+            seen: set = set()
             for strm_file in path.rglob("*.strm"):
                 if self._event.is_set():
                     logger.info("STRM全量扫描已停止")
                     return
                 if self.__is_excluded(strm_file):
                     continue
+                target = self.__find_scrape_target(strm_file)
+                if not target:
+                    continue
+                key = str(target)
+                if key in seen:
+                    continue
+                seen.add(key)
                 try:
-                    self.__scrape_strm(strm_file)
+                    self.__scrape_target(target)
                 except Exception as e:
-                    logger.error(f"刮削 {strm_file} 出错：{str(e)}")
+                    logger.error(f"刮削 {target} 出错：{str(e)}")
         logger.info("STRM全量扫描完成")
 
     # ------------------------------------------------------------------
