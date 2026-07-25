@@ -52,7 +52,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -161,19 +161,21 @@ class StrmScraper(_PluginBase):
             if any(p in event_path for p in ["/@Recycle/", "/#recycle/", "/@eaDir", "/."]):
                 logger.debug(f"{event_path} 是回收站或隐藏文件，跳过")
                 return
-            self.__scrape(file_path)
+            self.__scrape(self.__series_root(file_path))
         except Exception as e:
             logger.error(f"STRM事件处理出错：{str(e)} - {traceback.format_exc()}")
 
     # ------------------------------------------------------------------
     # 刮削实现：全部交给主程序 MediaChain，本插件不落任何元数据
     # ------------------------------------------------------------------
-    def __scrape(self, file_path: Path):
-        # 向上定位剧集根目录（电影停在该目录）。
+    def __scrape(self, target_dir: Path):
+        # target_dir 已是定位好的剧集根目录（电影为其所在目录）。
+        # 注意：调用方（event_handler / full_scan）已负责向上定位剧集根，
+        # 此处不要再对 target_dir 调用 __series_root，否则会把目录当成文件
+        # 再次向上取父目录，导致所有剧集被折叠成监控根目录。
         # 只有对“目录”刮削，主程序才写出 tvshow.nfo + poster/backdrop/logo/
         # banner/thumb/season01-poster + Season1/season.nfo，与手动刮削目录一致；
         # 单文件刮削只会出单集 .nfo，缺上述剧集级文件。
-        target_dir = self.__series_root(file_path)
         key = str(target_dir)
         now = time.time()
         with lock:

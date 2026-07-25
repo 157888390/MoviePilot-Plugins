@@ -3,11 +3,12 @@
     "name": "STRM监控刮削",
     "description": "监控目录中新增的.strm文件，自动调用主程序刮削链补齐剧集级元数据（tvshow.nfo/海报等），记录完全由主程序管理。",
     "labels": "刮削,STRM,监控",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "icon": "strmscraper.png",
     "author": "157888390",
     "level": 2,
     "history": {
+      "v1.1.1": "修复全量扫描/事件把全部剧集根目录错误折叠为监控根目录的 bug：__scrape 不再二次计算 series_root，改由调用方一次性定位；此前会把整库误刮成一部电影",
       "v1.1.0": "借鉴目录实时监控插件简化实现：移除去抖 worker 线程与 APScheduler 调度器，改用 StorageChain.get_file_item 取目录文件项调用 scrape_metadata；保留向上定位剧集根目录就地刮削（不转移）；新增 /strm_scan API",
       "v1.0.1": "修复刮削不完整：改为对剧集根目录（而非单文件 .strm）刮削，补齐 tvshow.nfo / poster / backdrop / logo / banner / thumb / Season1/season.nfo",
       "v1.0.0": "首次发布：监控目录新增.strm文件并调用主程序刮削链"
