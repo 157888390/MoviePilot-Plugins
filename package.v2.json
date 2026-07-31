@@ -13,5 +13,17 @@
       "v1.0.1": "修复刮削不完整：改为对剧集根目录（而非单文件 .strm）刮削，补齐 tvshow.nfo / poster / backdrop / logo / banner / thumb / Season1/season.nfo",
       "v1.0.0": "首次发布：监控目录新增.strm文件并调用主程序刮削链"
     }
+  },
+  "HardLinkCleaner": {
+    "name": "硬链接联动清理",
+    "description": "单向监控源目录，源文件/文件夹被删除或移出时，自动清理硬链接目录中对应的硬链接及其刮削产物（.nfo/海报等），并级联清理空目录。",
+    "labels": "硬链接,清理,监控",
+    "version": "1.0.0",
+    "icon": "hardlinkcleaner.png",
+    "author": "157888390",
+    "level": 2,
+    "history": {
+      "v1.0.0": "首次发布：单向监控源目录，联动清理硬链接目录对应内容及其刮削产物，支持空目录级联清理、删除去抖、孤儿扫描 API（/hardlink_cleanup）"
+    }
   }
 }
