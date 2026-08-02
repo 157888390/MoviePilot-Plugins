@@ -52,7 +52,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -75,6 +75,8 @@ class StrmScraper(_PluginBase):
     _scraped: Dict[str, float] = {}   # 已刮削目录 + 时间戳，做轻量去重
     mediaChain = None
     storagechain = None
+    _cron_enabled = False            # 启用定时全量刷新
+    _cron_expression = ""            # 标准 5 段 cron：分 时 日 月 周（如 "0 4 * * *"）
 
     def init_plugin(self, config: dict = None):
         self.mediaChain = MediaChain()
@@ -88,6 +90,8 @@ class StrmScraper(_PluginBase):
             self._exclude_keywords = config.get("exclude_keywords") or ""
             self._overwrite = config.get("overwrite") or False
             self._onlyonce = config.get("onlyonce") or False
+            self._cron_enabled = config.get("cron_enabled") or False
+            self._cron_expression = (config.get("cron_expression") or "").strip()
 
         # 先停止现有监控
         self.stop_service()
@@ -133,6 +137,8 @@ class StrmScraper(_PluginBase):
             "exclude_keywords": self._exclude_keywords,
             "overwrite": self._overwrite,
             "onlyonce": False,
+            "cron_enabled": self._cron_enabled,
+            "cron_expression": self._cron_expression,
         })
 
     def get_state(self) -> bool:
@@ -233,6 +239,47 @@ class StrmScraper(_PluginBase):
                     logger.error(f"STRM刮削失败 {target}：{str(e)}")
 
     # ------------------------------------------------------------------
+    # 定时全量刷新（cron）：通过重写 get_service() 向 MoviePilot 本体调度器
+    # 注册任务，由本体（APScheduler）按 cron 表达式周期性执行，不自行造轮子。
+    # 本体每次更新会先 remove 旧任务再 add，因此启用/禁用/改表达式都会自动生效。
+    # ------------------------------------------------------------------
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        向本体调度器注册定时任务。仅在启用且 cron 表达式合法时返回服务，
+        关闭或表达式非法时返回空列表（本体据此移除旧任务）。
+        """
+        if not self._cron_enabled or not self._cron_expression:
+            return []
+        try:
+            from apscheduler.triggers.cron import CronTrigger
+            trigger = CronTrigger.from_crontab(self._cron_expression)
+        except Exception as e:
+            logger.error(f"STRM定时刷新：cron 表达式无效 [{self._cron_expression}]：{e}")
+            return []
+        return [{
+            "id": "strm_cron_scan",
+            "name": "STRM定时全量刷新",
+            "trigger": trigger,
+            "func": self.scheduled_full_scan,
+            "kwargs": {
+                "max_instances": 1,
+                "misfire_grace_time": 3600,
+                "coalesce": True,
+            },
+        }]
+
+    def scheduled_full_scan(self):
+        """cron 到点触发：对全部监控目录执行一次全量刷新刮削"""
+        if not self._cron_enabled:
+            return
+        try:
+            logger.info("STRM定时刷新触发：开始全量扫描")
+            self.full_scan()
+            logger.info("STRM定时刷新完成")
+        except Exception as e:
+            logger.error(f"STRM定时刷新失败：{str(e)} - {traceback.format_exc()}")
+
+    # ------------------------------------------------------------------
     # 远程触发 / API
     # ------------------------------------------------------------------
     def get_api(self) -> List[Dict[str, Any]]:
@@ -318,6 +365,55 @@ class StrmScraper(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "cron_enabled", "label": "启用定时全量刷新"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "cron_expression",
+                                            "label": "Cron 表达式（分 时 日 月 周）",
+                                            "placeholder": "如 0 4 * * * 表示每天 04:00",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "info",
+                                            "variant": "tonal",
+                                            "text": "启用后通过主程序定时器（APScheduler）按上述 Cron 表达式自动全量刷新刮削；"
+                                                    "关闭或改表达式会自动重新注册，无需重启。",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -382,6 +478,8 @@ class StrmScraper(_PluginBase):
             "mode": "compatibility",
             "monitor_dirs": "",
             "exclude_keywords": "",
+            "cron_enabled": False,
+            "cron_expression": "0 4 * * *",
         }
 
     def get_page(self) -> Optional[List[dict]]:
