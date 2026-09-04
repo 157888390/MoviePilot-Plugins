@@ -3,11 +3,12 @@
     "name": "STRM监控刮削",
     "description": "监控目录中新增的.strm文件，自动调用主程序刮削链补齐剧集级元数据（tvshow.nfo/海报等），记录完全由主程序管理。",
     "labels": "刮削,STRM,监控",
-    "version": "1.1.2",
+    "version": "1.1.3",
     "icon": "strmscraper.png",
     "author": "157888390",
     "level": 2,
     "history": {
+      "v1.1.3": "适配 MoviePilot v3：scrape_metadata 已被移除，改用 MediaChain.manual_scrape(storage, fileitem, init_folder=True) 触发主程序刮削；不再依赖 StorageChain.get_file_item（直接构造本地目录 FileItem）；移除失效的“覆盖已有元数据”开关（v3 始终覆盖写）",
       "v1.1.2": "新增定时全量刷新：通过重写 get_service() 接入 MoviePilot 本体调度器（APScheduler），按可配置的 Cron 表达式自动全量刷新刮削目录，不自行维护调度器；关闭或改表达式自动重新注册",
       "v1.1.1": "修复全量扫描/事件把全部剧集根目录错误折叠为监控根目录的 bug：__scrape 不再二次计算 series_root，改由调用方一次性定位；此前会把整库误刮成一部电影",
       "v1.1.0": "借鉴目录实时监控插件简化实现：移除去抖 worker 线程与 APScheduler 调度器，改用 StorageChain.get_file_item 取目录文件项调用 scrape_metadata；保留向上定位剧集根目录就地刮削（不转移）；新增 /strm_scan API",

@@ -11,7 +11,6 @@ from watchdog.observers.polling import PollingObserver
 
 from app import schemas
 from app.chain.media import MediaChain
-from app.chain.storage import StorageChain
 from app.log import logger
 from app.plugins import _PluginBase
 
@@ -52,7 +51,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -70,17 +69,14 @@ class StrmScraper(_PluginBase):
     _mode = "compatibility"        # compatibility=轮询(兼容SMB/CD2/rclone挂载) / fast=inotify(本地盘)
     _monitor_dirs = ""
     _exclude_keywords = ""
-    _overwrite = False
     _onlyonce = False
     _scraped: Dict[str, float] = {}   # 已刮削目录 + 时间戳，做轻量去重
     mediaChain = None
-    storagechain = None
     _cron_enabled = False            # 启用定时全量刷新
     _cron_expression = ""            # 标准 5 段 cron：分 时 日 月 周（如 "0 4 * * *"）
 
     def init_plugin(self, config: dict = None):
         self.mediaChain = MediaChain()
-        self.storagechain = StorageChain()
         self._scraped = {}
 
         if config:
@@ -88,7 +84,6 @@ class StrmScraper(_PluginBase):
             self._mode = config.get("mode") or "compatibility"
             self._monitor_dirs = config.get("monitor_dirs") or ""
             self._exclude_keywords = config.get("exclude_keywords") or ""
-            self._overwrite = config.get("overwrite") or False
             self._onlyonce = config.get("onlyonce") or False
             self._cron_enabled = config.get("cron_enabled") or False
             self._cron_expression = (config.get("cron_expression") or "").strip()
@@ -135,7 +130,6 @@ class StrmScraper(_PluginBase):
             "mode": self._mode,
             "monitor_dirs": self._monitor_dirs,
             "exclude_keywords": self._exclude_keywords,
-            "overwrite": self._overwrite,
             "onlyonce": False,
             "cron_enabled": self._cron_enabled,
             "cron_expression": self._cron_expression,
@@ -191,13 +185,16 @@ class StrmScraper(_PluginBase):
             self._scraped[key] = now
 
         try:
-            # 用主程序 storagechain 构造文件项（目录 → type=dir）
-            file_item = self.storagechain.get_file_item(storage="local", path=target_dir)
-            if not file_item:
-                logger.warn(f"未找到文件项：{target_dir}")
-                return
-            # 刮削“目录”而非单文件：NFO/图片/记录完全由主程序管理，与手动刮削一致
-            self.mediaChain.scrape_metadata(fileitem=file_item, overwrite=self._overwrite)
+            # 直接构造本地目录文件项（type=dir）；不依赖 StorageChain，避免 v3 API 漂移
+            file_item = schemas.FileItem(
+                type="dir",
+                path=str(target_dir),
+                name=target_dir.name,
+            )
+            # 刮削“目录”而非单文件：NFO/图片/记录完全由主程序管理，与手动刮削一致；
+            # init_folder=True 确保 tvshow.nfo / season.nfo / 海报 等剧集级文件被生成。
+            # v3 起 manual_scrape 取代旧 scrape_metadata（无 overwrite 参数，始终覆盖写）。
+            self.mediaChain.manual_scrape(storage="local", fileitem=file_item, init_folder=True)
             logger.info(f"STRM刮削完成：{target_dir}")
         except Exception as e:
             logger.error(f"STRM刮削失败 {target_dir}：{str(e)} - {traceback.format_exc()}")
@@ -323,16 +320,6 @@ class StrmScraper(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {"model": "onlyonce", "label": "立即全量扫描一次"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "overwrite", "label": "覆盖已有元数据"},
                                     }
                                 ],
                             },
@@ -474,7 +461,6 @@ class StrmScraper(_PluginBase):
         ], {
             "enabled": False,
             "onlyonce": False,
-            "overwrite": False,
             "mode": "compatibility",
             "monitor_dirs": "",
             "exclude_keywords": "",
