@@ -10,10 +10,10 @@ from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
 from app import schemas
-from app.chain.media import MediaChain
+from app.chain.scraping import ScrapingChain
 from app.chain.storage import StorageChain
-from app.log import logger
 from app.plugins import _PluginBase
+from app.sdk.logging import logger
 
 # 全局锁，避免并发刮削同一目录
 lock = threading.Lock()
@@ -48,11 +48,11 @@ class StrmScraper(_PluginBase):
     # 插件名称
     plugin_name = "STRM监控刮削"
     # 插件描述
-    plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链补齐剧集级元数据（tvshow.nfo/海报等），记录完全由主程序管理。"
+    plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），记录完全由主程序管理。V3 专用插件。"
     # 插件图标
     plugin_icon = "strmscraper.png"
-    # 插件版本
-    plugin_version = "1.1.3"
+    # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
+    plugin_version = "2.0.0"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -70,17 +70,13 @@ class StrmScraper(_PluginBase):
     _mode = "compatibility"        # compatibility=轮询(兼容SMB/CD2/rclone挂载) / fast=inotify(本地盘)
     _monitor_dirs = ""
     _exclude_keywords = ""
-    _overwrite = False
+    _overwrite = False             # 是否覆盖已有刮削产物
     _onlyonce = False
     _scraped: Dict[str, float] = {}   # 已刮削目录 + 时间戳，做轻量去重
-    mediaChain = None
-    storagechain = None
     _cron_enabled = False            # 启用定时全量刷新
     _cron_expression = ""            # 标准 5 段 cron：分 时 日 月 周（如 "0 4 * * *"）
 
     def init_plugin(self, config: dict = None):
-        self.mediaChain = MediaChain()
-        self.storagechain = StorageChain()
         self._scraped = {}
 
         if config:
@@ -172,7 +168,7 @@ class StrmScraper(_PluginBase):
             logger.error(f"STRM事件处理出错：{str(e)} - {traceback.format_exc()}")
 
     # ------------------------------------------------------------------
-    # 刮削实现：全部交给主程序 MediaChain，本插件不落任何元数据
+    # 刮削实现：全部交给主程序 ScrapingChain，本插件不落任何元数据
     # ------------------------------------------------------------------
     def __scrape(self, target_dir: Path):
         # target_dir 已是定位好的剧集根目录（电影为其所在目录）。
@@ -191,14 +187,28 @@ class StrmScraper(_PluginBase):
             self._scraped[key] = now
 
         try:
-            # 用主程序 storagechain 构造文件项（目录 → type=dir）
-            file_item = self.storagechain.get_file_item(storage="local", path=target_dir)
+            # 用主程序 StorageChain 按本地路径解析出带 storage 字段的文件项；
+            # ScrapingChain.scrape_metadata 内部依赖 fileitem.storage 定位，
+            # 因此必须用 get_file_item 构造，不能手写缺 storage 的 FileItem。
+            file_item = StorageChain().get_file_item(storage="local", path=Path(target_dir))
             if not file_item:
-                logger.warn(f"未找到文件项：{target_dir}")
+                logger.warn(
+                    f"未找到本地文件项：{target_dir}（请确认该路径已作为本地存储挂载到 MoviePilot）"
+                )
                 return
-            # 刮削“目录”而非单文件：NFO/图片/记录完全由主程序管理，与手动刮削一致
-            self.mediaChain.scrape_metadata(fileitem=file_item, overwrite=self._overwrite)
-            logger.info(f"STRM刮削完成：{target_dir}")
+            # 刮削“目录”而非单文件：NFO/图片/记录完全由主程序管理，与手动刮削一致；
+            # init_folder=True 确保 tvshow.nfo / season.nfo / 海报 等剧集级文件被生成；
+            # recursive=True 递归整棵目录树（含每个 .strm 的单集 nfo）。
+            ok, msg = ScrapingChain().scrape_metadata(
+                fileitem=file_item,
+                init_folder=True,
+                overwrite=self._overwrite,
+                recursive=True,
+            )
+            if ok:
+                logger.info(f"STRM刮削完成：{target_dir}")
+            else:
+                logger.warn(f"STRM刮削未完全成功 {target_dir}：{msg}")
         except Exception as e:
             logger.error(f"STRM刮削失败 {target_dir}：{str(e)} - {traceback.format_exc()}")
 
@@ -461,7 +471,7 @@ class StrmScraper(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "刮削通过主程序刮削链完成，NFO/图片/记录与手动刮削完全一致；"
+                                            "text": "刮削通过主程序 ScrapingChain 完成，NFO/图片/记录与手动刮削完全一致；"
                                                     "网络挂载目录（CD2/rclone/SMB等）请选择兼容模式。",
                                         },
                                     }
