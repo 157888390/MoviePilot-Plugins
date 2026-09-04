@@ -52,7 +52,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -170,6 +170,37 @@ class StrmScraper(_PluginBase):
     # ------------------------------------------------------------------
     # 刮削实现：全部交给主程序 ScrapingChain，本插件不落任何元数据
     # ------------------------------------------------------------------
+    def __resolve_file_item(self, path: Path):
+        """
+        按路径解析出带 storage 字段的文件项。
+        优先尝试 local（路径以本地挂载形式存在时，如 CloudDrive2 的 FUSE 挂载）；
+        若 local 取不到，再枚举其它已配置存储（CloudDrive / alist / rclone 等）兜底，
+        避免把 storage 写死为 "local" 而在纯云盘挂载场景下失效。
+        """
+        def _try(stype: str):
+            try:
+                return StorageChain().get_file_item(storage=stype, path=Path(path))
+            except Exception:
+                return None
+
+        # 1) 优先 local：保持当前可用行为（/media/strm 等以本地挂载存在时）
+        item = _try("local")
+        if item:
+            return item
+        # 2) local 取不到，枚举其它已配置存储兜底
+        try:
+            from app.sdk.services import StorageHelper
+            for s in StorageHelper().get_storagies():
+                stype = getattr(s, "type", None)
+                if not stype or stype == "local":
+                    continue
+                item = _try(stype)
+                if item:
+                    return item
+        except Exception as e:
+            logger.warning(f"枚举存储失败，已回退 local：{e}")
+        return None
+
     def __scrape(self, target_dir: Path):
         # target_dir 已是定位好的剧集根目录（电影为其所在目录）。
         # 注意：调用方（event_handler / full_scan）已负责向上定位剧集根，
@@ -187,13 +218,16 @@ class StrmScraper(_PluginBase):
             self._scraped[key] = now
 
         try:
-            # 用主程序 StorageChain 按本地路径解析出带 storage 字段的文件项；
+            # 用主程序 StorageChain 按路径解析出带 storage 字段的文件项；
             # ScrapingChain.scrape_metadata 内部依赖 fileitem.storage 定位，
             # 因此必须用 get_file_item 构造，不能手写缺 storage 的 FileItem。
-            file_item = StorageChain().get_file_item(storage="local", path=Path(target_dir))
+            # storage 不再写死为 "local"：先试 local，取不到再枚举其它已配置
+            # 存储（CloudDrive / alist / rclone 等）兜底。
+            file_item = self.__resolve_file_item(target_dir)
             if not file_item:
                 logger.warn(
-                    f"未找到本地文件项：{target_dir}（请确认该路径已作为本地存储挂载到 MoviePilot）"
+                    f"未找到文件项：{target_dir}（请确认该路径已在 MoviePilot 存储中配置，"
+                    f"或已作为本地存储挂载）"
                 )
                 return
             # 刮削“目录”而非单文件：NFO/图片/记录完全由主程序管理，与手动刮削一致；
