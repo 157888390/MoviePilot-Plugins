@@ -53,7 +53,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "2.0.2"
+    plugin_version = "2.0.3"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -632,7 +632,9 @@ class StrmScraper(_PluginBase):
                     continue
                 seen.add(k)
                 if k not in all_series:
-                    all_series[k] = {"path": k, "title": target.name}
+                    # 统计该目录下的 strm 文件数（即使还没刮削过也要显示）
+                    strm_count = len(list(target.rglob("*.strm")))
+                    all_series[k] = {"path": k, "title": target.name, "strm_count": strm_count}
 
         # 合并历史数据
         for key, info in details.items():
@@ -750,7 +752,6 @@ class StrmScraper(_PluginBase):
         from app.core.config import settings
 
         title = info.get("title", "未知")
-        title_display = (title[:10] + "...") if len(title) > 10 else title
         path = info.get("path", "")
         poster = info.get("poster_path", "")
         strm_count = info.get("strm_count", 0)
@@ -769,17 +770,19 @@ class StrmScraper(_PluginBase):
             status_text = f"失败: {message[:20]}" if message else "刮削失败"
             status_color = "text-error"
 
-        # 海报图片（无海报时用占位）
+        # 海报图片（通过 MoviePilot 图片代理展示本地文件）
         if poster:
+            from urllib.parse import quote
+            poster_url = f"/{settings.API_TOKEN}/image/local?path={quote(poster)}"
             poster_component = {
                 "component": "VImg",
                 "props": {
-                    "src": poster,
+                    "src": poster_url,
                     "height": 240, "width": 160,
                     "aspect-ratio": "2/3",
                     "class": "object-cover shadow ring-gray-500 max-w-32",
                     "cover": True, "transition": True,
-                    "lazy-src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAPAAAACgCAQAAACY0inuAAABB0lEQVR42u3RMREAAAjEMF45M65xwcClEppMlx4XwIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgARZgwAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AACzBgARZgARZgARZgwAIswAIswAIswIABAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAzYBsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizAAgxYgAVYgAVYgAUYsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizAAgxYgAVYgAVYgAVYgAUYsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizA",
+                    "lazy-src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAPAAAACgCAQAAACY0inuAAABB0lEQVR42u3RMREAAAjEMF45M65xwcClEppMlx4XwIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgARZgwAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AACzBgARZgARZgARZgwAIswAIswAIswIABAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAzYBsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizAAgxYgAVYgAVYgAUYsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizAAgxYgAVYgAVYgAVYgAUYsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizA",
                 },
             }
         else:
@@ -788,9 +791,13 @@ class StrmScraper(_PluginBase):
                 "component": "div",
                 "props": {
                     "class": "flex items-center justify-center bg-grey-darken-3 shadow ring-gray-500 max-w-32",
-                    "style": "width:160px;height:240px;",
+                    "style": "width:160px;height:240px;overflow:hidden;",
                 },
-                "text": title_display,
+                "content": [{
+                    "component": "span",
+                    "props": {"class": "text-caption text-center px-2", "style": "text-overflow:ellipsis;"},
+                    "text": title,
+                }],
             }
 
         # 重新刮削按钮
@@ -831,10 +838,10 @@ class StrmScraper(_PluginBase):
                                 {
                                     "component": "VCardTitle",
                                     "props": {
-                                        "class": "pt-6 pl-4 pr-4 text-lg whitespace-nowrap",
-                                        "style": "width: 12rem",
+                                        "class": "pt-6 pl-4 pr-4 text-lg",
+                                        "style": "width: 12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                     },
-                                    "text": title_display,
+                                    "text": title,
                                 },
                                 {
                                     "component": "VCardText",
