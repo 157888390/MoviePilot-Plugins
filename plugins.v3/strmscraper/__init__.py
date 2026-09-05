@@ -2,6 +2,7 @@ import re
 import threading
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,7 +53,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "2.0.1"
+    plugin_version = "2.0.2"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -243,8 +244,54 @@ class StrmScraper(_PluginBase):
                 logger.info(f"STRM刮削完成：{target_dir}")
             else:
                 logger.warn(f"STRM刮削未完全成功 {target_dir}：{msg}")
+            # 记录刮削历史（供详情页展示）
+            self.__record_scrape_history(target_dir, ok, msg)
         except Exception as e:
             logger.error(f"STRM刮削失败 {target_dir}：{str(e)} - {traceback.format_exc()}")
+
+    def __record_scrape_history(self, target_dir: Path, success: bool, msg: str = ""):
+        """记录一次刮削结果到插件数据，供 get_page() 详情页展示"""
+        try:
+            history = self.get_data("scrape_history") or {}
+            key = str(target_dir)
+
+            # 统计该目录下的 strm 文件数
+            strm_count = len(list(target_dir.rglob("*.strm")))
+
+            # 尝试从 tvshow.nfo 提取标题和海报
+            title = target_dir.name
+            poster_path = ""
+            tvshow_nfo = target_dir / "tvshow.nfo"
+            if tvshow_nfo.exists():
+                try:
+                    import xml.etree.ElementTree as ET
+                    tree = ET.parse(tvshow_nfo)
+                    root = tree.getroot()
+                    t = root.findtext("title")
+                    if t:
+                        title = t
+                except Exception:
+                    pass
+            # 海报文件
+            for poster_file in ["poster.jpg", "poster.png"]:
+                p = target_dir / poster_file
+                if p.exists():
+                    poster_path = str(p)
+                    break
+
+            history[key] = {
+                "title": title,
+                "path": key,
+                "poster_path": poster_path,
+                "strm_count": strm_count,
+                "last_scrape": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_scrape_short": datetime.now().strftime("%m-%d %H:%M"),
+                "success": success,
+                "message": msg,
+            }
+            self.save_data("scrape_history", history)
+        except Exception as e:
+            logger.debug(f"记录刮削历史失败（非阻断）：{e}")
 
     @staticmethod
     def __series_root(file_path: Path) -> Path:
@@ -327,17 +374,49 @@ class StrmScraper(_PluginBase):
     # 远程触发 / API
     # ------------------------------------------------------------------
     def get_api(self) -> List[Dict[str, Any]]:
-        return [{
-            "path": "/strm_scan",
-            "endpoint": self.api_scan,
-            "methods": ["GET"],
-            "summary": "STRM全量刮削",
-            "description": "触发一次全量扫描刮削",
-        }]
+        return [
+            {
+                "path": "/strm_scan",
+                "endpoint": self.api_scan,
+                "methods": ["GET"],
+                "summary": "STRM全量刮削",
+                "description": "触发一次全量扫描刮削",
+            },
+            {
+                "path": "/strm_rescrape",
+                "endpoint": self.api_rescrape,
+                "methods": ["GET"],
+                "summary": "重新刮削单个合集",
+                "description": "对指定目录（覆盖模式）重新执行一次刮削",
+            },
+        ]
 
     def api_scan(self) -> schemas.Response:
         threading.Thread(target=self.full_scan, daemon=True).start()
         return schemas.Response(success=True)
+
+    def api_rescrape(self, path: str, apikey: str = "") -> schemas.Response:
+        """对单个合集目录执行覆盖重刮"""
+        from app.core.config import settings
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        target = Path(path)
+        if not target.exists():
+            return schemas.Response(success=False, message=f"目录不存在：{path}")
+        # 临时开启覆盖，绕过去重 TTL
+        old_overwrite = self._overwrite
+        self._overwrite = True
+        # 清除该目录的去重缓存
+        key = str(target)
+        with lock:
+            self._scraped.pop(key, None)
+        try:
+            self.__scrape(target)
+            return schemas.Response(success=True, message=f"已触发重新刮削：{path}")
+        except Exception as e:
+            return schemas.Response(success=False, message=f"刮削失败：{e}")
+        finally:
+            self._overwrite = old_overwrite
 
     # ------------------------------------------------------------------
     # 界面
@@ -527,7 +606,267 @@ class StrmScraper(_PluginBase):
         }
 
     def get_page(self) -> Optional[List[dict]]:
-        return None
+        """
+        详情页：展示已刮削的合集（按剧集根目录分组），每个卡片带重新刮削按钮。
+        仿照 EpisodeNoExist 插件的卡片网格布局。
+        """
+        from app.core.config import settings
+
+        history = self.get_data("scrape_history") or {}
+        details = history if isinstance(history, dict) else {}
+
+        # 同时扫描监控目录，发现新目录也展示（即使还没刮削过）
+        all_series: Dict[str, Dict] = {}
+        for mon_path in [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]:
+            root = Path(mon_path)
+            if not root.exists():
+                continue
+            seen: set = set()
+            for strm in root.rglob("*.strm"):
+                if self._exclude_keywords:
+                    if any(kw and re.findall(kw, str(strm)) for kw in self._exclude_keywords.split("\n")):
+                        continue
+                target = self.__series_root(strm)
+                k = str(target)
+                if k in seen:
+                    continue
+                seen.add(k)
+                if k not in all_series:
+                    all_series[k] = {"path": k, "title": target.name}
+
+        # 合并历史数据
+        for key, info in details.items():
+            if key in all_series:
+                all_series[key].update(info)
+            else:
+                all_series[key] = info
+
+        series_list = list(all_series.values())
+        # 按最近刮削时间排序
+        series_list.sort(
+            key=lambda x: x.get("last_scrape", ""), reverse=True
+        )
+
+        # 统计
+        total_series = len(series_list)
+        total_strms = sum(s.get("strm_count", 0) for s in series_list)
+        success_count = sum(1 for s in series_list if s.get("success"))
+        failed_count = total_series - success_count
+
+        # 统计卡片行
+        stat_cards = self.__build_stat_cards(total_series, total_strms, success_count, failed_count)
+
+        # 合集卡片网格
+        cards_content = []
+        if not series_list:
+            cards_content.append({
+                "component": "div",
+                "text": "暂无数据，请先配置监控目录并启用插件",
+                "props": {"class": "text-center text-caption py-8"},
+            })
+        else:
+            for item in series_list:
+                cards_content.append(self.__build_series_card(item))
+
+        return [
+            {
+                "component": "div",
+                "content": [
+                    stat_cards,
+                    {
+                        "component": "VCardTitle",
+                        "props": {
+                            "class": "pt-6 pb-2 px-0 text-base whitespace-nowrap text-center",
+                        },
+                        "content": [{
+                            "component": "span",
+                            "text": "··· 已刮削合集 ···",
+                        }],
+                    },
+                    {
+                        "component": "div",
+                        "props": {
+                            "class": "flex flex-row flex-wrap gap-4 items-start justify-center",
+                        },
+                        "content": cards_content,
+                    },
+                ],
+            }
+        ]
+
+    # ------------------------------------------------------------------
+    # 详情页组件构建方法
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def __build_stat_cards(
+        total_series: int, total_strms: int, success: int, failed: int
+    ) -> dict:
+        """构建顶部统计卡片行"""
+        stats = [
+            ("总合集", f"{total_series} 部", "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z M7 10h2v7H7zm4-3h2v10h-2zm4 3h2v7h-2z"),
+            ("总集数", f"{total_strms} 集", "M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-2zm0 14H4v-6h14v6zM7 15h2v-2H7v2zm4 0h2v-2h-2v2zm4 0h2v-2h-2v2z"),
+            ("成功", f"{success} 部", "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"),
+            ("失败/未刮", f"{failed} 部", "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"),
+        ]
+        cards = []
+        for label, value, svg_d in stats:
+            cards.append({
+                "component": "VCard",
+                "props": {"variant": "tonal", "style": "width: 10rem;"},
+                "content": [{
+                    "component": "VCardText",
+                    "props": {"class": "d-flex align-center"},
+                    "content": [
+                        {
+                            "component": "svg",
+                            "props": {
+                                "class": "icon mr-2",
+                                "viewBox": "0 0 24 24", "width": "32", "height": "32",
+                            },
+                            "content": [{
+                                "component": "path",
+                                "props": {"fill": "#8a8a8a", "d": svg_d},
+                            }],
+                        },
+                        {
+                            "component": "div",
+                            "content": [
+                                {"component": "span", "props": {"class": "text-caption"}, "text": label},
+                                {"component": "span", "props": {"class": "text-h6"}, "text": value},
+                            ],
+                        },
+                    ],
+                }],
+            })
+        return {
+            "component": "VRow",
+            "props": {"class": "flex flex-row justify-center flex-wrap gap-6 pt-4"},
+            "content": cards,
+        }
+
+    def __build_series_card(self, info: dict) -> dict:
+        """构建单个合集卡片：海报 + 信息 + 重新刮削按钮"""
+        from app.core.config import settings
+
+        title = info.get("title", "未知")
+        title_display = (title[:10] + "...") if len(title) > 10 else title
+        path = info.get("path", "")
+        poster = info.get("poster_path", "")
+        strm_count = info.get("strm_count", 0)
+        last_scrape = info.get("last_scrape_short", "未刮削")
+        success = info.get("success")
+        message = info.get("message", "")
+
+        # 状态文字
+        if success is None:
+            status_text = "待刮削"
+            status_color = "text-grey"
+        elif success:
+            status_text = "刮削成功"
+            status_color = "text-success"
+        else:
+            status_text = f"失败: {message[:20]}" if message else "刮削失败"
+            status_color = "text-error"
+
+        # 海报图片（无海报时用占位）
+        if poster:
+            poster_component = {
+                "component": "VImg",
+                "props": {
+                    "src": poster,
+                    "height": 240, "width": 160,
+                    "aspect-ratio": "2/3",
+                    "class": "object-cover shadow ring-gray-500 max-w-32",
+                    "cover": True, "transition": True,
+                    "lazy-src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAPAAAACgCAQAAACY0inuAAABB0lEQVR42u3RMREAAAjEMF45M65xwcClEppMlx4XwIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgARZgwAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AACzBgARZgARZgARZgwAIswAIswAIswIABAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIAFWIABC7AAC7AAC7AAAzYBsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizAAgxYgAVYgAVYgAUYsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizAAgxYgAVYgAVYgAVYgAUYsAALsAALsAALMGABFmABFmABFmDAAizAAizAAizA",
+                },
+            }
+        else:
+            # 无海报时显示一个带标题的色块
+            poster_component = {
+                "component": "div",
+                "props": {
+                    "class": "flex items-center justify-center bg-grey-darken-3 shadow ring-gray-500 max-w-32",
+                    "style": "width:160px;height:240px;",
+                },
+                "text": title_display,
+            }
+
+        # 重新刮削按钮
+        rescrape_btn = {
+            "component": "VBtn",
+            "props": {
+                "class": "text-primary flex-grow",
+                "variant": "tonal",
+                "style": "height: 100%",
+                "size": "small",
+            },
+            "events": {
+                "click": {
+                    "api": "plugin/StrmScraper/strm_rescrape",
+                    "method": "get",
+                    "params": {
+                        "path": path,
+                        "apikey": settings.API_TOKEN,
+                    },
+                }
+            },
+            "text": "重新刮削",
+        }
+
+        return {
+            "component": "VCard",
+            "props": {"variant": "tonal"},
+            "content": [
+                {
+                    "component": "div",
+                    "props": {"class": "flex flex-row"},
+                    "content": [
+                        poster_component,
+                        {
+                            "component": "div",
+                            "props": {"class": ""},
+                            "content": [
+                                {
+                                    "component": "VCardTitle",
+                                    "props": {
+                                        "class": "pt-6 pl-4 pr-4 text-lg whitespace-nowrap",
+                                        "style": "width: 12rem",
+                                    },
+                                    "text": title_display,
+                                },
+                                {
+                                    "component": "VCardText",
+                                    "props": {"class": "pa-0 pl-4 pr-4 pb-1 whitespace-nowrap"},
+                                    "text": f"状态: {status_text}",
+                                },
+                                {
+                                    "component": "VCardText",
+                                    "props": {"class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"},
+                                    "text": f"集数: {strm_count}",
+                                },
+                                {
+                                    "component": "VCardText",
+                                    "props": {"class": "pa-0 pl-4 pr-4 py-1 whitespace-nowrap"},
+                                    "text": f"刮削: {last_scrape}",
+                                },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "component": "div",
+                    "props": {
+                        "class": "bg-opacity-80 flex flex-row-reverse justify-between "
+                                 "items-center flex-nowrap space-x-reverse space-x-4",
+                        "variant": "tonal",
+                        "rounded": "0",
+                    },
+                    "content": [rescrape_btn],
+                },
+            ],
+        }
 
     def stop_service(self):
         """
