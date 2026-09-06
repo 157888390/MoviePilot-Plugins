@@ -11,9 +11,11 @@ from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
 from app import schemas
+from app.chain.media import MediaChain
 from app.chain.scraping import ScrapingChain
 from app.chain.storage import StorageChain
 from app.plugins import _PluginBase
+from app.schemas.types import MediaType
 from app.sdk.logging import logger
 
 # 全局锁，避免并发刮削同一目录
@@ -53,7 +55,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "2.0.3"
+    plugin_version = "2.0.4"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -258,9 +260,9 @@ class StrmScraper(_PluginBase):
             # 统计该目录下的 strm 文件数
             strm_count = len(list(target_dir.rglob("*.strm")))
 
-            # 尝试从 tvshow.nfo 提取标题和海报
+            # 尝试从 tvshow.nfo 提取标题和 tmdbid
             title = target_dir.name
-            poster_path = ""
+            tmdbid = 0
             tvshow_nfo = target_dir / "tvshow.nfo"
             if tvshow_nfo.exists():
                 try:
@@ -270,14 +272,14 @@ class StrmScraper(_PluginBase):
                     t = root.findtext("title")
                     if t:
                         title = t
+                    tid = root.findtext("tmdbid")
+                    if tid and tid.isdigit():
+                        tmdbid = int(tid)
                 except Exception:
                     pass
-            # 海报文件
-            for poster_file in ["poster.jpg", "poster.png"]:
-                p = target_dir / poster_file
-                if p.exists():
-                    poster_path = str(p)
-                    break
+
+            # 海报地址：仿照「缺失集数订阅」用 TMDB 海报 URL（前端自动走图片代理）
+            poster_path = self.__get_poster_path(tmdbid, target_dir)
 
             history[key] = {
                 "title": title,
@@ -292,6 +294,32 @@ class StrmScraper(_PluginBase):
             self.save_data("scrape_history", history)
         except Exception as e:
             logger.debug(f"记录刮削历史失败（非阻断）：{e}")
+
+    @staticmethod
+    def __get_poster_path(tmdbid: int, target_dir: Path) -> str:
+        """
+        获取海报地址，优先用 TMDB 海报 URL（前端 VImg 自动走 /api/v1/system/img 代理），
+        失败再回退本地 poster.jpg（通过 /api/v1/system/img/local 代理）。
+        均无则返回默认占位图（与缺失集数订阅一致）。
+        """
+        default_poster = "/assets/no-image-CweBJ8Ee.jpeg"
+        # 1) TMDB 海报 URL（与「缺失集数订阅」同款）
+        if tmdbid:
+            try:
+                mediainfo = MediaChain().recognize_media(
+                    mtype=MediaType.TV, tmdbid=tmdbid
+                )
+                if mediainfo and mediainfo.poster_path:
+                    return mediainfo.poster_path
+            except Exception as e:
+                logger.debug(f"通过 TMDB 获取海报失败：{e}")
+        # 2) 本地 poster.jpg/png（走图片代理）
+        for poster_file in ["poster.jpg", "poster.png"]:
+            p = target_dir / poster_file
+            if p.exists():
+                from urllib.parse import quote
+                return f"/api/v1/system/img/local?path={quote(str(p))}"
+        return default_poster
 
     @staticmethod
     def __series_root(file_path: Path) -> Path:
@@ -704,12 +732,12 @@ class StrmScraper(_PluginBase):
     def __build_stat_cards(
         total_series: int, total_strms: int, success: int, failed: int
     ) -> dict:
-        """构建顶部统计卡片行"""
+        """构建顶部统计卡片行（结构对齐「缺失集数订阅」）"""
         stats = [
-            ("总合集", f"{total_series} 部", "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z M7 10h2v7H7zm4-3h2v10h-2zm4 3h2v7h-2z"),
-            ("总集数", f"{total_strms} 集", "M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-2zm0 14H4v-6h14v6zM7 15h2v-2H7v2zm4 0h2v-2h-2v2zm4 0h2v-2h-2v2z"),
-            ("成功", f"{success} 部", "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"),
-            ("失败/未刮", f"{failed} 部", "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"),
+            ("总合集", f"{total_series}部", "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14z M7 10h2v7H7zm4-3h2v10h-2zm4 3h2v7h-2z"),
+            ("总集数", f"{total_strms}集", "M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-2zm0 14H4v-6h14v6zM7 15h2v-2H7v2zm4 0h2v-2h-2v2zm4 0h2v-2h-2v2z"),
+            ("成功", f"{success}部", "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"),
+            ("失败/未刮", f"{failed}部", "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"),
         ]
         cards = []
         for label, value, svg_d in stats:
@@ -723,8 +751,8 @@ class StrmScraper(_PluginBase):
                         {
                             "component": "svg",
                             "props": {
-                                "class": "icon mr-2",
-                                "viewBox": "0 0 24 24", "width": "32", "height": "32",
+                                "class": "icon",
+                                "viewBox": "0 0 24 24", "width": "40", "height": "40",
                             },
                             "content": [{
                                 "component": "path",
@@ -733,9 +761,16 @@ class StrmScraper(_PluginBase):
                         },
                         {
                             "component": "div",
+                            "props": {"class": "ml-2"},
                             "content": [
                                 {"component": "span", "props": {"class": "text-caption"}, "text": label},
-                                {"component": "span", "props": {"class": "text-h6"}, "text": value},
+                                {
+                                    "component": "div",
+                                    "props": {"class": "d-flex align-center flex-wrap"},
+                                    "content": [
+                                        {"component": "span", "props": {"class": "text-h6"}, "text": value},
+                                    ],
+                                },
                             ],
                         },
                     ],
@@ -770,14 +805,13 @@ class StrmScraper(_PluginBase):
             status_text = f"失败: {message[:20]}" if message else "刮削失败"
             status_color = "text-error"
 
-        # 海报图片（通过 MoviePilot 图片代理展示本地文件）
+        # 海报图片：poster 已是 TMDB URL 或本地代理 URL，直接做 src
+        # （VImg 对远程 URL 自动走 /api/v1/system/img 代理，逻辑对齐「缺失集数订阅」）
         if poster:
-            from urllib.parse import quote
-            poster_url = f"/{settings.API_TOKEN}/image/local?path={quote(poster)}"
             poster_component = {
                 "component": "VImg",
                 "props": {
-                    "src": poster_url,
+                    "src": poster,
                     "height": 240, "width": 160,
                     "aspect-ratio": "2/3",
                     "class": "object-cover shadow ring-gray-500 max-w-32",
@@ -800,14 +834,13 @@ class StrmScraper(_PluginBase):
                 }],
             }
 
-        # 重新刮削按钮
+        # 重新刮削按钮（结构对齐「缺失集数订阅」：VBtnToggle 包 VBtn）
         rescrape_btn = {
             "component": "VBtn",
             "props": {
                 "class": "text-primary flex-grow",
                 "variant": "tonal",
                 "style": "height: 100%",
-                "size": "small",
             },
             "events": {
                 "click": {
@@ -863,7 +896,7 @@ class StrmScraper(_PluginBase):
                     ],
                 },
                 {
-                    "component": "div",
+                    "component": "VBtnToggle",
                     "props": {
                         "class": "bg-opacity-80 flex flex-row-reverse justify-between "
                                  "items-center flex-nowrap space-x-reverse space-x-4",
