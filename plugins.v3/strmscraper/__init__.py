@@ -55,7 +55,7 @@ class StrmScraper(_PluginBase):
     # 插件图标
     plugin_icon = "strmscraper.png"
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "2.0.4"
+    plugin_version = "2.0.5"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -272,9 +272,15 @@ class StrmScraper(_PluginBase):
                     t = root.findtext("title")
                     if t:
                         title = t
+                    # 优先 <tmdbid>(MoviePilot格式)，回退 <uniqueid type="tmdb">(Kodi标准)
                     tid = root.findtext("tmdbid")
                     if tid and tid.isdigit():
                         tmdbid = int(tid)
+                    else:
+                        for uid in root.iter("uniqueid"):
+                            if uid.get("type") == "tmdb" and uid.text and uid.text.isdigit():
+                                tmdbid = int(uid.text)
+                                break
                 except Exception:
                     pass
 
@@ -298,28 +304,54 @@ class StrmScraper(_PluginBase):
     @staticmethod
     def __get_poster_path(tmdbid: int, target_dir: Path) -> str:
         """
-        获取海报地址，优先用 TMDB 海报 URL（前端 VImg 自动走 /api/v1/system/img 代理），
-        失败再回退本地 poster.jpg（通过 /api/v1/system/img/local 代理）。
-        均无则返回默认占位图（与缺失集数订阅一致）。
+        获取海报地址（优先级从高到低）：
+        1) MediaChain.recognize_media 取 TMDB poster_path（完整 URL）
+        2) 直接调 TMDB API 用 tmdbid 拿 poster_path，拼成 image.tmdb.org URL
+        3) 本地 poster.jpg/png 走 /api/v1/system/img/local?path= 代理
+        4) 内联 SVG 占位图（不依赖外部资源，一定可用）
         """
-        default_poster = "/assets/no-image-CweBJ8Ee.jpeg"
-        # 1) TMDB 海报 URL（与「缺失集数订阅」同款）
+        # 1) MediaChain 获取（与「缺失集数订阅」一致）
         if tmdbid:
             try:
                 mediainfo = MediaChain().recognize_media(
                     mtype=MediaType.TV, tmdbid=tmdbid
                 )
-                if mediainfo and mediainfo.poster_path:
+                if mediainfo and getattr(mediainfo, "poster_path", None):
                     return mediainfo.poster_path
             except Exception as e:
-                logger.debug(f"通过 TMDB 获取海报失败：{e}")
-        # 2) 本地 poster.jpg/png（走图片代理）
+                logger.debug(f"MediaChain 获取海报失败(tmdbid={tmdbid})：{e}")
+
+            # 2) 直接调 TMDB API 兜底（绕过 MediaChain 可能的缓存/识别问题）
+            try:
+                import json
+                from urllib.request import urlopen, Request
+                url = (
+                    f"https://api.themoviedb.org/3/tv/{tmdbid}?"
+                    f"api_key=4d7ae4bdc5b94f416a688189711eb06c&language=zh-CN"
+                )
+                req = Request(url, headers={"User-Agent": "MoviePilot-Plugin/2.0"})
+                with urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode())
+                    poster = data.get("poster_path", "")
+                    if poster:
+                        return f"https://image.tmdb.org/t/p/w500{poster}"
+            except Exception as e:
+                logger.debug(f"TMDB API 获取海报失败(tmdbid={tmdbid})：{e}")
+
+        # 3) 本地海报文件（走 MoviePilot 图片代理）
         for poster_file in ["poster.jpg", "poster.png"]:
             p = target_dir / poster_file
             if p.exists():
                 from urllib.parse import quote
                 return f"/api/v1/system/img/local?path={quote(str(p))}"
-        return default_poster
+
+        # 4) 内联 SVG data URI 占位图（100% 可用，不依赖任何外部文件）
+        return ("data:image/svg+xml;charset=utf-8,"
+                "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 240'%3E"
+                "%3Crect fill='%2337474f' width='160' height='240'/%3E"
+                "%3Ctext x='80' y='125' text-anchor='middle' fill='%2390a4ae'"
+                " font-size='14' font-family='sans-serif'%3ENo Poster%3C/text%3E"
+                "%3C/svg%3E")
 
     @staticmethod
     def __series_root(file_path: Path) -> Path:
@@ -743,7 +775,7 @@ class StrmScraper(_PluginBase):
         for label, value, svg_d in stats:
             cards.append({
                 "component": "VCard",
-                "props": {"variant": "tonal", "style": "width: 10rem;"},
+                "props": {"variant": "tonal", "style": "min-width: 9rem;max-width:11rem;"},
                 "content": [{
                     "component": "VCardText",
                     "props": {"class": "d-flex align-center"},
@@ -872,7 +904,8 @@ class StrmScraper(_PluginBase):
                                     "component": "VCardTitle",
                                     "props": {
                                         "class": "pt-6 pl-4 pr-4 text-lg",
-                                        "style": "width: 12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                        "style": "min-width:8rem;max-width:18rem;"
+                                                 "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                     },
                                     "text": title,
                                 },
