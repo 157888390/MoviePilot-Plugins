@@ -596,13 +596,15 @@ onBeforeUnmount(() => { clearInterval(taskTimer) })
   color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
 }
 
+/* 详情抽屉：层级必须高于 MP 顶栏/侧栏（1000），否则顶部会被顶栏盖住；
+   但仍保持在 v-overlay（2000）/ v-dialog（2400）之下，弹窗类界面才能盖住它 */
 .strm-mask {
-  position: fixed; inset: 0; z-index: 30; background: rgba(10, 11, 20, .45);
+  position: fixed; inset: 0; z-index: 1300; background: rgba(10, 11, 20, .45);
   opacity: 0; pointer-events: none; transition: opacity .25s;
 }
 .strm-mask.is-open { opacity: 1; pointer-events: auto; }
 .strm-drawer {
-  position: fixed; top: 0; right: -640px; z-index: 31; width: 620px; max-width: 95vw; height: 100vh;
+  position: fixed; top: 0; right: -640px; z-index: 1400; width: 620px; max-width: 95vw; height: 100vh;
   display: flex; flex-direction: column; transition: right .28s cubic-bezier(.4, 0, .2, 1);
   background: rgb(var(--v-theme-surface, 255, 255, 255));
   box-shadow: -14px 0 44px rgba(10, 11, 20, .18);
@@ -616,7 +618,9 @@ onBeforeUnmount(() => { clearInterval(taskTimer) })
 
 /* 页面内设置面板 */
 .strm-cfg-mask {
-  position: fixed; inset: 0; z-index: 60;
+  /* 必须高于 MP 顶栏/侧栏（1000）与 v-overlay（2000），对齐 v-dialog 的 2400；
+     原值 60 会让遮罩被顶栏和侧栏盖住，弹窗也就被"压"在内容区里 */
+  position: fixed; inset: 0; z-index: 2400;
   background: rgba(0, 0, 0, .45);
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }

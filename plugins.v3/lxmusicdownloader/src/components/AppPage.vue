@@ -414,7 +414,9 @@ onBeforeUnmount(() => { clearTimeout(noticeTimer) })
 .lx-mini:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .4); color: rgb(var(--v-theme-primary, 124, 92, 252)); }
 
 .lx-cfg-mask {
-  position: fixed; inset: 0; z-index: 60;
+  /* 必须高于 MP 顶栏/侧栏（1000）与 v-overlay（2000），对齐 v-dialog 的 2400；
+     原值 60 会让遮罩被顶栏和侧栏盖住，弹窗也就被"压"在内容区里 */
+  position: fixed; inset: 0; z-index: 2400;
   background: rgba(0, 0, 0, .45);
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }
