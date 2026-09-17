@@ -49,8 +49,11 @@ class StrmScraper(_PluginBase):
     plugin_name = "STRM监控刮削"
     # 插件描述
     plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链补齐剧集级元数据（tvshow.nfo/海报等），记录完全由主程序管理。"
-    # 插件图标
-    plugin_icon = "strmscraper.png"
+    # 插件图标（自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图）
+    plugin_icon = (
+        "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
+        "/main/icons/strmscraper.png"
+    )
     # 插件版本
     plugin_version = "1.1.3"
     # 插件作者

@@ -38,7 +38,11 @@ class LxMusicDownloader(_PluginBase):
 
     plugin_name = "LX 音源下载"
     plugin_desc = "调用自建 LX Sync Server，搜索歌曲并下载到自定义目录。"
-    plugin_icon = "lxmusicdownloader.png"
+    # 自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图
+    plugin_icon = (
+        "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
+        "/main/icons/lxmusicdownloader.png"
+    )
     plugin_version = "3.0.0"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
