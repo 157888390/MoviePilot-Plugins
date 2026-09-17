@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import ConfigPanel from './__federation_expose_Config-PRJODT8C.js';
+import ConfigPanel from './__federation_expose_Config-EiQJsWBF.js';
 import { _ as _export_sfc, m as makeApiCall, f as formatSize, S as SOURCES, Q as QUALITIES, s as songKey, c as coverOf, a as singerOf, q as qualitiesOf, b as bodyOf, u as unwrap } from './_plugin-vue_export-helper-CcgWpvTR.js';
 
 const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,unref:_unref,vModelText:_vModelText,withKeys:_withKeys,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,createTextVNode:_createTextVNode,createVNode:_createVNode,withModifiers:_withModifiers,Teleport:_Teleport,createBlock:_createBlock} = await importShared('vue');
@@ -11,68 +11,69 @@ const _hoisted_3 = { class: "lx-head-chips" };
 const _hoisted_4 = { class: "lx-chip is-muted" };
 const _hoisted_5 = { class: "lx-head-actions" };
 const _hoisted_6 = ["disabled"];
-const _hoisted_7 = {
+const _hoisted_7 = ["disabled"];
+const _hoisted_8 = {
   key: 0,
   class: "lx-alert is-error"
 };
-const _hoisted_8 = {
+const _hoisted_9 = {
   key: 1,
   class: "lx-alert is-ok"
 };
-const _hoisted_9 = { class: "lx-stats" };
-const _hoisted_10 = { class: "lx-stat is-ok" };
-const _hoisted_11 = { class: "lx-stat" };
+const _hoisted_10 = { class: "lx-stats" };
+const _hoisted_11 = { class: "lx-stat is-ok" };
 const _hoisted_12 = { class: "lx-stat" };
-const _hoisted_13 = { class: "lx-stat is-mv" };
-const _hoisted_14 = { class: "lx-search" };
-const _hoisted_15 = ["value"];
+const _hoisted_13 = { class: "lx-stat" };
+const _hoisted_14 = { class: "lx-stat is-mv" };
+const _hoisted_15 = { class: "lx-search" };
 const _hoisted_16 = ["value"];
-const _hoisted_17 = ["disabled"];
-const _hoisted_18 = { class: "lx-tip" };
-const _hoisted_19 = {
+const _hoisted_17 = ["value"];
+const _hoisted_18 = ["disabled"];
+const _hoisted_19 = { class: "lx-tip" };
+const _hoisted_20 = {
   key: 0,
   class: "lx-warn"
 };
-const _hoisted_20 = {
+const _hoisted_21 = {
   key: 2,
   class: "lx-empty"
 };
-const _hoisted_21 = {
+const _hoisted_22 = {
   key: 3,
   class: "lx-empty"
 };
-const _hoisted_22 = {
+const _hoisted_23 = {
   key: 4,
   class: "lx-list"
 };
-const _hoisted_23 = ["src", "alt", "onError"];
-const _hoisted_24 = {
+const _hoisted_24 = ["src", "alt", "onError"];
+const _hoisted_25 = {
   key: 1,
   class: "lx-cover-ph"
 };
-const _hoisted_25 = { class: "lx-info" };
-const _hoisted_26 = ["title"];
-const _hoisted_27 = { class: "lx-sub" };
-const _hoisted_28 = { class: "lx-tags" };
-const _hoisted_29 = {
+const _hoisted_26 = { class: "lx-info" };
+const _hoisted_27 = ["title"];
+const _hoisted_28 = { class: "lx-sub" };
+const _hoisted_29 = { class: "lx-tags" };
+const _hoisted_30 = {
   key: 0,
   class: "lx-tag is-plain"
 };
-const _hoisted_30 = { class: "lx-row-actions" };
-const _hoisted_31 = ["onClick"];
-const _hoisted_32 = ["disabled", "onClick"];
-const _hoisted_33 = {
+const _hoisted_31 = { class: "lx-row-actions" };
+const _hoisted_32 = ["onClick"];
+const _hoisted_33 = ["disabled", "onClick"];
+const _hoisted_34 = {
   key: 5,
   class: "lx-resolved"
 };
-const _hoisted_34 = { class: "lx-resolved-head" };
-const _hoisted_35 = { class: "lx-tag is-ok" };
-const _hoisted_36 = {
+const _hoisted_35 = { class: "lx-resolved-head" };
+const _hoisted_36 = { class: "lx-tag is-ok" };
+const _hoisted_37 = {
   key: 0,
   class: "lx-tag is-plain"
 };
-const _hoisted_37 = { class: "lx-resolved-url" };
-const _hoisted_38 = { class: "lx-cfg-wrap" };
+const _hoisted_38 = { class: "lx-resolved-url" };
+const _hoisted_39 = { class: "lx-cfg-wrap" };
 
 const {onBeforeUnmount,onMounted,reactive,ref} = await importShared('vue');
 
@@ -209,6 +210,7 @@ function copyUrl(url) {
 
 // 设置面板
 const showSettings = ref(false);
+const loadingSettings = ref(false);
 const settingsModel = ref({});
 
 /*
@@ -223,13 +225,18 @@ const overlayTarget = (typeof document !== 'undefined' && document.querySelector
   ? '.v-application'
   : 'body';
 
+// 必须先拿到配置再挂载面板：Config 只在初值到达后才渲染，避免先闪一屏默认值
 async function openSettings() {
-  showSettings.value = true;
+  if (loadingSettings.value) return
+  loadingSettings.value = true;
   try {
     const raw = await props.api.get(`plugin/form/${props.pluginId}`);
     settingsModel.value = bodyOf(raw)?.model || {};
+    showSettings.value = true;
   } catch (readError) {
     error.value = `读取配置失败：${readError?.message || readError}`;
+  } finally {
+    loadingSettings.value = false;
   }
 }
 
@@ -266,39 +273,40 @@ return (_ctx, _cache) => {
       _createElementVNode("div", _hoisted_5, [
         _createElementVNode("button", {
           class: "lx-btn ghost",
+          disabled: loadingSettings.value,
           onClick: openSettings
-        }, "设置"),
+        }, _toDisplayString(loadingSettings.value ? '读取中…' : '设置'), 9, _hoisted_6),
         _createElementVNode("button", {
           class: "lx-btn ghost",
           disabled: loading.value,
           onClick: loadEverything
-        }, "刷新", 8, _hoisted_6)
+        }, "刷新", 8, _hoisted_7)
       ])
     ]),
     (error.value)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_7, _toDisplayString(error.value), 1))
+      ? (_openBlock(), _createElementBlock("div", _hoisted_8, _toDisplayString(error.value), 1))
       : (notice.value)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_8, _toDisplayString(notice.value), 1))
+        ? (_openBlock(), _createElementBlock("div", _hoisted_9, _toDisplayString(notice.value), 1))
         : _createCommentVNode("", true),
-    _createElementVNode("div", _hoisted_9, [
-      _createElementVNode("div", _hoisted_10, [
+    _createElementVNode("div", _hoisted_10, [
+      _createElementVNode("div", _hoisted_11, [
         _createElementVNode("b", null, _toDisplayString(_unref(formatSize)(cacheInfo().totalSize)), 1),
         _cache[10] || (_cache[10] = _createElementVNode("span", null, "服务端缓存占用", -1))
       ]),
-      _createElementVNode("div", _hoisted_11, [
+      _createElementVNode("div", _hoisted_12, [
         _createElementVNode("b", null, _toDisplayString(cacheInfo().fileCount || 0), 1),
         _cache[11] || (_cache[11] = _createElementVNode("span", null, "缓存文件数", -1))
       ]),
-      _createElementVNode("div", _hoisted_12, [
+      _createElementVNode("div", _hoisted_13, [
         _createElementVNode("b", null, _toDisplayString(songs.value.length), 1),
         _cache[12] || (_cache[12] = _createElementVNode("span", null, "本次搜索候选", -1))
       ]),
-      _createElementVNode("div", _hoisted_13, [
+      _createElementVNode("div", _hoisted_14, [
         _createElementVNode("b", null, _toDisplayString(overview.value.max_results || 10), 1),
         _cache[13] || (_cache[13] = _createElementVNode("span", null, "搜索上限", -1))
       ])
     ]),
-    _createElementVNode("div", _hoisted_14, [
+    _createElementVNode("div", _hoisted_15, [
       _withDirectives(_createElementVNode("input", {
         "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => ((keyword).value = $event)),
         class: "lx-input",
@@ -316,7 +324,7 @@ return (_ctx, _cache) => {
           return (_openBlock(), _createElementBlock("option", {
             key: item.value,
             value: item.value
-          }, _toDisplayString(item.label), 9, _hoisted_15))
+          }, _toDisplayString(item.label), 9, _hoisted_16))
         }), 128))
       ], 512), [
         [_vModelSelect, source.value]
@@ -329,7 +337,7 @@ return (_ctx, _cache) => {
           return (_openBlock(), _createElementBlock("option", {
             key: item.value,
             value: item.value
-          }, _toDisplayString(item.label), 9, _hoisted_16))
+          }, _toDisplayString(item.label), 9, _hoisted_17))
         }), 128))
       ], 512), [
         [_vModelSelect, quality.value]
@@ -352,20 +360,20 @@ return (_ctx, _cache) => {
         class: "lx-btn",
         disabled: searching.value,
         onClick: doSearch
-      }, _toDisplayString(searching.value ? '搜索中…' : '搜索'), 9, _hoisted_17)
+      }, _toDisplayString(searching.value ? '搜索中…' : '搜索'), 9, _hoisted_18)
     ]),
-    _createElementVNode("p", _hoisted_18, [
+    _createElementVNode("p", _hoisted_19, [
       _cache[14] || (_cache[14] = _createTextVNode(" 下载目录：", -1)),
       _createElementVNode("code", null, _toDisplayString(overview.value.download_dir || '-'), 1),
       (overview.value.source === 'tx')
-        ? (_openBlock(), _createElementBlock("span", _hoisted_19, "（酷狗/酷我等平台可用；QQ 音乐搜索在服务端长期故障）"))
+        ? (_openBlock(), _createElementBlock("span", _hoisted_20, "（酷狗/酷我等平台可用；QQ 音乐搜索在服务端长期故障）"))
         : _createCommentVNode("", true)
     ]),
     (searching.value)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_20, "正在搜索…"))
+      ? (_openBlock(), _createElementBlock("div", _hoisted_21, "正在搜索…"))
       : (!songs.value.length)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_21, "输入关键词开始搜索"))
-        : (_openBlock(), _createElementBlock("div", _hoisted_22, [
+        ? (_openBlock(), _createElementBlock("div", _hoisted_22, "输入关键词开始搜索"))
+        : (_openBlock(), _createElementBlock("div", _hoisted_23, [
             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(songs.value, (song) => {
               return (_openBlock(), _createElementBlock("div", {
                 key: _unref(songKey)(song),
@@ -382,18 +390,18 @@ return (_ctx, _cache) => {
                         loading: "lazy",
                         referrerpolicy: "no-referrer",
                         onError: $event => (markCoverFailed(song))
-                      }, null, 40, _hoisted_23))
-                    : (_openBlock(), _createElementBlock("span", _hoisted_24, "♪"))
+                      }, null, 40, _hoisted_24))
+                    : (_openBlock(), _createElementBlock("span", _hoisted_25, "♪"))
                 ], 2),
-                _createElementVNode("div", _hoisted_25, [
+                _createElementVNode("div", _hoisted_26, [
                   _createElementVNode("div", {
                     class: "lx-title",
                     title: song.name
-                  }, _toDisplayString(song.name), 9, _hoisted_26),
-                  _createElementVNode("div", _hoisted_27, _toDisplayString(_unref(singerOf)(song)) + " · " + _toDisplayString(song.albumName || '未知专辑'), 1),
-                  _createElementVNode("div", _hoisted_28, [
+                  }, _toDisplayString(song.name), 9, _hoisted_27),
+                  _createElementVNode("div", _hoisted_28, _toDisplayString(_unref(singerOf)(song)) + " · " + _toDisplayString(song.albumName || '未知专辑'), 1),
+                  _createElementVNode("div", _hoisted_29, [
                     (song.interval)
-                      ? (_openBlock(), _createElementBlock("span", _hoisted_29, _toDisplayString(song.interval), 1))
+                      ? (_openBlock(), _createElementBlock("span", _hoisted_30, _toDisplayString(song.interval), 1))
                       : _createCommentVNode("", true),
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_unref(qualitiesOf)(song), (q) => {
                       return (_openBlock(), _createElementBlock("span", {
@@ -403,34 +411,34 @@ return (_ctx, _cache) => {
                     }), 128))
                   ])
                 ]),
-                _createElementVNode("div", _hoisted_30, [
+                _createElementVNode("div", _hoisted_31, [
                   _createElementVNode("button", {
                     class: "lx-btn small ghost",
                     onClick: $event => (resolveSong(song))
-                  }, "解析", 8, _hoisted_31),
+                  }, "解析", 8, _hoisted_32),
                   _createElementVNode("button", {
                     class: "lx-btn small",
                     disabled: downloading[_unref(songKey)(song)],
                     onClick: $event => (doDownload(song))
-                  }, _toDisplayString(downloading[_unref(songKey)(song)] ? '下载中…' : '下载'), 9, _hoisted_32)
+                  }, _toDisplayString(downloading[_unref(songKey)(song)] ? '下载中…' : '下载'), 9, _hoisted_33)
                 ])
               ]))
             }), 128))
           ])),
     (lastResolved.value)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_33, [
-          _createElementVNode("div", _hoisted_34, [
+      ? (_openBlock(), _createElementBlock("div", _hoisted_34, [
+          _createElementVNode("div", _hoisted_35, [
             _createElementVNode("b", null, _toDisplayString(lastResolved.value.name), 1),
-            _createElementVNode("span", _hoisted_35, _toDisplayString(lastResolved.value.type), 1),
+            _createElementVNode("span", _hoisted_36, _toDisplayString(lastResolved.value.type), 1),
             (lastResolved.value.source_name)
-              ? (_openBlock(), _createElementBlock("span", _hoisted_36, _toDisplayString(lastResolved.value.source_name), 1))
+              ? (_openBlock(), _createElementBlock("span", _hoisted_37, _toDisplayString(lastResolved.value.source_name), 1))
               : _createCommentVNode("", true),
             _createElementVNode("button", {
               class: "lx-mini",
               onClick: _cache[4] || (_cache[4] = $event => (lastResolved.value = null))
             }, "关闭")
           ]),
-          _createElementVNode("div", _hoisted_37, [
+          _createElementVNode("div", _hoisted_38, [
             _createElementVNode("code", null, _toDisplayString(lastResolved.value.url), 1),
             _createElementVNode("button", {
               class: "lx-mini",
@@ -446,7 +454,7 @@ return (_ctx, _cache) => {
             class: "lx-cfg-mask",
             onClick: _cache[7] || (_cache[7] = _withModifiers($event => (showSettings.value = false), ["self"]))
           }, [
-            _createElementVNode("div", _hoisted_38, [
+            _createElementVNode("div", _hoisted_39, [
               _createVNode(ConfigPanel, {
                 "initial-config": settingsModel.value,
                 api: props.api,
@@ -463,6 +471,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6d492f2c"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-f5fcda24"]]);
 
 export { AppPage as default };

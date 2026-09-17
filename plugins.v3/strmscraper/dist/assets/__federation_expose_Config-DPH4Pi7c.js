@@ -31,7 +31,7 @@ const _hoisted_18 = { class: "cfg-foot" };
 const _hoisted_19 = ["disabled"];
 const _hoisted_20 = ["disabled"];
 
-const {onMounted,reactive,ref} = await importShared('vue');
+const {reactive,ref,watch} = await importShared('vue');
 
 
 
@@ -73,12 +73,20 @@ const MODES = [
   { title: '性能模式（inotify，仅本地盘）', value: 'fast' },
 ];
 
-onMounted(() => {
-  const source = props.initialConfig || {};
+/*
+ * 用 watch(immediate) 而不是 onMounted 读取初值：宿主可能在本组件挂载之后才
+ * 拿到配置（例如页面内设置弹窗是「先弹出、后请求」），只读一次会永远读到空对象，
+ * 表现为「第一次打开显示默认值、第二次打开才对」。
+ */
+function applyInitial(source) {
+  if (!source || typeof source !== 'object') return
+  if (!Object.keys(source).length) return
   Object.keys(DEFAULTS).forEach(key => {
     if (key in source && source[key] !== undefined && source[key] !== null) config[key] = source[key];
   });
-});
+}
+
+watch(() => props.initialConfig, applyInitial, { immediate: true, deep: true });
 
 const apiCall = (method, path, payload) => {
   if (typeof props.api?.[method] === 'function') return props.api[method](`plugin/${props.pluginId}${path}`, payload)
@@ -279,6 +287,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ConfigPanel = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b47e41c6"]]);
+const ConfigPanel = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3843d137"]]);
 
 export { ConfigPanel as default };
