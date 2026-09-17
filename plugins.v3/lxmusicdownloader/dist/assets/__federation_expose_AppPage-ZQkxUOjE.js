@@ -2,7 +2,7 @@ import { importShared } from './__federation_fn_import-JrT3xvdd.js';
 import ConfigPanel from './__federation_expose_Config-PRJODT8C.js';
 import { _ as _export_sfc, m as makeApiCall, f as formatSize, S as SOURCES, Q as QUALITIES, s as songKey, c as coverOf, a as singerOf, q as qualitiesOf, b as bodyOf, u as unwrap } from './_plugin-vue_export-helper-CcgWpvTR.js';
 
-const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,unref:_unref,vModelText:_vModelText,withKeys:_withKeys,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,createTextVNode:_createTextVNode,createVNode:_createVNode,withModifiers:_withModifiers} = await importShared('vue');
+const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,unref:_unref,vModelText:_vModelText,withKeys:_withKeys,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,createTextVNode:_createTextVNode,createVNode:_createVNode,withModifiers:_withModifiers,Teleport:_Teleport,createBlock:_createBlock} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "lx-page" };
@@ -210,6 +210,18 @@ function copyUrl(url) {
 // 设置面板
 const showSettings = ref(false);
 const settingsModel = ref({});
+
+/*
+ * MP 会给插件页面套一层「包含块祖先」（容器查询 / transform / contain 之类），
+ * 于是 position:fixed 不再是相对窗口定位，而是被关进「内容区」这一个盒子里：
+ *   - 顶栏与侧栏在盒子之外 → 无论 z-index 多大都盖不住它们
+ *   - 弹窗按内容区居中，而不是按窗口居中
+ * 把浮层 Teleport 出去才能跳出这层上下文。优先挂到 .v-application（保留 Vuetify 的
+ * CSS 变量），兜底 body。
+ */
+const overlayTarget = (typeof document !== 'undefined' && document.querySelector('.v-application'))
+  ? '.v-application'
+  : 'body';
 
 async function openSettings() {
   showSettings.value = true;
@@ -427,28 +439,30 @@ return (_ctx, _cache) => {
           ])
         ]))
       : _createCommentVNode("", true),
-    (showSettings.value)
-      ? (_openBlock(), _createElementBlock("div", {
-          key: 6,
-          class: "lx-cfg-mask",
-          onClick: _cache[7] || (_cache[7] = _withModifiers($event => (showSettings.value = false), ["self"]))
-        }, [
-          _createElementVNode("div", _hoisted_38, [
-            _createVNode(ConfigPanel, {
-              "initial-config": settingsModel.value,
-              api: props.api,
-              "plugin-id": props.pluginId,
-              onSave: saveSettings,
-              onClose: _cache[6] || (_cache[6] = $event => (showSettings.value = false))
-            }, null, 8, ["initial-config", "api", "plugin-id"])
-          ])
-        ]))
-      : _createCommentVNode("", true)
+    (_openBlock(), _createBlock(_Teleport, { to: _unref(overlayTarget) }, [
+      (showSettings.value)
+        ? (_openBlock(), _createElementBlock("div", {
+            key: 0,
+            class: "lx-cfg-mask",
+            onClick: _cache[7] || (_cache[7] = _withModifiers($event => (showSettings.value = false), ["self"]))
+          }, [
+            _createElementVNode("div", _hoisted_38, [
+              _createVNode(ConfigPanel, {
+                "initial-config": settingsModel.value,
+                api: props.api,
+                "plugin-id": props.pluginId,
+                onSave: saveSettings,
+                onClose: _cache[6] || (_cache[6] = $event => (showSettings.value = false))
+              }, null, 8, ["initial-config", "api", "plugin-id"])
+            ])
+          ]))
+        : _createCommentVNode("", true)
+    ], 8, ["to"]))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0f15d1ba"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6d492f2c"]]);
 
 export { AppPage as default };

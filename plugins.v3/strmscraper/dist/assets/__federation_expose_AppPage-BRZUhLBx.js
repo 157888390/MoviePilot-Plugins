@@ -3,7 +3,7 @@ import ConfigPanel from './__federation_expose_Config-oicJGwFG.js';
 import { m as makeApiCall, v as versionLabel, p as posterStyle, c as coverUrl, s as statusOf, f as formatSize, u as unwrap, b as bodyOf } from './strm-Drmjz18_.js';
 import { _ as _export_sfc } from './_plugin-vue_export-helper-pcqpp-6-.js';
 
-const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,normalizeStyle:_normalizeStyle,createTextVNode:_createTextVNode,vModelText:_vModelText,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,unref:_unref,createVNode:_createVNode,withModifiers:_withModifiers} = await importShared('vue');
+const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,normalizeStyle:_normalizeStyle,createTextVNode:_createTextVNode,vModelText:_vModelText,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,unref:_unref,createVNode:_createVNode,withModifiers:_withModifiers,Teleport:_Teleport,createBlock:_createBlock} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "strm-page" };
@@ -143,6 +143,18 @@ function markPosterFailed(path) {
 // 页面内设置面板：直接复用设置弹窗的 Config 组件
 const showSettings = ref(false);
 const settingsModel = ref({});
+
+/*
+ * MP 会给插件页面套一层「包含块祖先」（容器查询 / transform / contain 之类），
+ * 于是 position:fixed 不再是相对窗口定位，而是被关进「内容区」这一个盒子里：
+ *   - 顶栏与侧栏在盒子之外 → 无论 z-index 多大都盖不住它们
+ *   - 浮层按内容区居中/铺满，而不是按窗口
+ * 设置弹窗与详情抽屉都必须 Teleport 出去才能跳出这层上下文。优先挂到
+ * .v-application（保留 Vuetify 的 CSS 变量），兜底 body。
+ */
+const overlayTarget = (typeof document !== 'undefined' && document.querySelector('.v-application'))
+  ? '.v-application'
+  : 'body';
 
 async function openSettings() {
   showSettings.value = true;
@@ -526,149 +538,151 @@ return (_ctx, _cache) => {
               ]))
             }), 128))
           ])),
-    (showSettings.value)
-      ? (_openBlock(), _createElementBlock("div", {
-          key: 6,
-          class: "strm-cfg-mask",
-          onClick: _cache[7] || (_cache[7] = _withModifiers($event => (showSettings.value = false), ["self"]))
-        }, [
-          _createElementVNode("div", _hoisted_39, [
-            _createVNode(ConfigPanel, {
-              "initial-config": settingsModel.value,
-              api: props.api,
-              "plugin-id": props.pluginId,
-              onSave: saveSettings,
-              onClose: _cache[6] || (_cache[6] = $event => (showSettings.value = false))
-            }, null, 8, ["initial-config", "api", "plugin-id"])
-          ])
-        ]))
-      : _createCommentVNode("", true),
-    _createElementVNode("div", {
-      class: _normalizeClass(['strm-mask', drawer.value && 'is-open']),
-      onClick: closeDrawer
-    }, null, 2),
-    _createElementVNode("div", {
-      class: _normalizeClass(['strm-drawer', drawer.value && 'is-open'])
-    }, [
-      (current.value)
-        ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
-            _createElementVNode("div", _hoisted_40, [
-              _createElementVNode("div", {
-                class: "strm-drawer-poster",
-                style: _normalizeStyle(_unref(posterStyle)(current.value.title))
-              }, [
-                (!posterFailed[current.value.path])
-                  ? (_openBlock(), _createElementBlock("img", {
-                      key: 0,
-                      class: "strm-poster-img",
-                      src: _unref(coverUrl)(props.api, props.pluginId, current.value),
-                      alt: current.value.title,
-                      onError: _cache[8] || (_cache[8] = $event => (markPosterFailed(current.value.path)))
-                    }, null, 40, _hoisted_41))
-                  : _createCommentVNode("", true)
-              ], 4),
-              _createElementVNode("div", _hoisted_42, [
-                _createElementVNode("h2", null, _toDisplayString(current.value.title), 1),
-                _createElementVNode("div", _hoisted_43, [
-                  _createElementVNode("span", null, _toDisplayString(current.value.type === 'tv' ? '电视剧' : '电影'), 1),
-                  _createElementVNode("span", null, _toDisplayString(current.value.total_files) + " 个文件", 1),
-                  _createElementVNode("span", null, "待刮削 " + _toDisplayString(current.value.unscraped), 1)
-                ])
-              ]),
-              _createElementVNode("button", {
-                class: "strm-close",
-                onClick: closeDrawer
-              }, "×")
-            ]),
-            (current.value.type === 'tv')
-              ? (_openBlock(), _createElementBlock("div", _hoisted_44, [
-                  (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(seasons.value, (season) => {
-                    return (_openBlock(), _createElementBlock("button", {
-                      key: season.no,
-                      class: _normalizeClass(['strm-season-chip', String(season.no) === seasonKey.value && 'active']),
-                      onClick: $event => (seasonKey.value = String(season.no))
-                    }, [
-                      _createTextVNode(_toDisplayString(season.name) + " ", 1),
-                      _createElementVNode("em", null, _toDisplayString(season.files.length), 1)
-                    ], 10, _hoisted_45))
-                  }), 128)),
-                  _createElementVNode("div", { class: "strm-season-right" }, [
-                    _createElementVNode("button", {
-                      class: "strm-mini",
-                      onClick: selectAll
-                    }, "全选本季"),
-                    _createElementVNode("button", {
-                      class: "strm-mini",
-                      onClick: selectUnscraped
-                    }, "选中未刮削"),
-                    _createElementVNode("button", {
-                      class: "strm-mini",
-                      onClick: clearSelection
-                    }, "清空")
-                  ])
-                ]))
-              : _createCommentVNode("", true),
-            _createElementVNode("div", _hoisted_46, [
-              (!rows.value.length)
-                ? (_openBlock(), _createElementBlock("div", _hoisted_47, "暂无文件"))
-                : _createCommentVNode("", true),
-              (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(rows.value, (row) => {
-                return (_openBlock(), _createElementBlock("div", {
-                  key: row.path,
-                  class: _normalizeClass(['strm-row', selected.value.has(row.path) && 'is-selected'])
-                }, [
-                  _createElementVNode("input", {
-                    type: "checkbox",
-                    checked: selected.value.has(row.path),
-                    onChange: $event => (toggleRow(row.path))
-                  }, null, 40, _hoisted_48),
-                  _createElementVNode("span", _hoisted_49, _toDisplayString(current.value.type === 'tv' ? `E${String(row.episode ?? 0).padStart(2, '0')}` : (row.label || '')), 1),
-                  _createElementVNode("span", {
-                    class: "strm-row-name",
-                    title: row.name
-                  }, _toDisplayString(row.name), 9, _hoisted_50),
-                  _createElementVNode("span", _hoisted_51, _toDisplayString(_unref(formatSize)(row.size)), 1),
-                  _createElementVNode("span", {
-                    class: _normalizeClass(['strm-row-state', row.scraped ? 'is-ok' : 'is-none'])
-                  }, [
-                    _cache[19] || (_cache[19] = _createElementVNode("i", null, null, -1)),
-                    _createTextVNode(_toDisplayString(row.scraped ? '已刮削' : '未刮削'), 1)
-                  ], 2),
-                  _createElementVNode("button", {
-                    class: "strm-mini",
-                    disabled: busy.value,
-                    onClick: $event => (scrapeOne(row))
-                  }, "刮削", 8, _hoisted_52)
-                ], 2))
-              }), 128))
-            ]),
-            _createElementVNode("div", _hoisted_53, [
-              _createElementVNode("span", _hoisted_54, [
-                _cache[20] || (_cache[20] = _createTextVNode("已选 ", -1)),
-                _createElementVNode("b", null, _toDisplayString(selectedRows.value.length), 1),
-                _cache[21] || (_cache[21] = _createTextVNode(" 项", -1))
-              ]),
-              _createElementVNode("div", _hoisted_55, [
-                _createElementVNode("button", {
-                  class: "strm-btn ghost",
-                  disabled: busy.value || !selectedRows.value.length,
-                  onClick: scrapeSelected
-                }, " 刮削选中" + _toDisplayString(current.value.type === 'tv' ? '单集' : '版本'), 9, _hoisted_56),
-                _createElementVNode("button", {
-                  class: "strm-btn",
-                  disabled: busy.value,
-                  onClick: scrapeWhole
-                }, _toDisplayString(current.value.type === 'tv' ? '整剧重新刮削' : '整部重新刮削'), 9, _hoisted_57)
-              ])
+    (_openBlock(), _createBlock(_Teleport, { to: _unref(overlayTarget) }, [
+      (showSettings.value)
+        ? (_openBlock(), _createElementBlock("div", {
+            key: 0,
+            class: "strm-cfg-mask",
+            onClick: _cache[7] || (_cache[7] = _withModifiers($event => (showSettings.value = false), ["self"]))
+          }, [
+            _createElementVNode("div", _hoisted_39, [
+              _createVNode(ConfigPanel, {
+                "initial-config": settingsModel.value,
+                api: props.api,
+                "plugin-id": props.pluginId,
+                onSave: saveSettings,
+                onClose: _cache[6] || (_cache[6] = $event => (showSettings.value = false))
+              }, null, 8, ["initial-config", "api", "plugin-id"])
             ])
-          ], 64))
-        : _createCommentVNode("", true)
-    ], 2)
+          ]))
+        : _createCommentVNode("", true),
+      _createElementVNode("div", {
+        class: _normalizeClass(['strm-mask', drawer.value && 'is-open']),
+        onClick: closeDrawer
+      }, null, 2),
+      _createElementVNode("div", {
+        class: _normalizeClass(['strm-drawer', drawer.value && 'is-open'])
+      }, [
+        (current.value)
+          ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+              _createElementVNode("div", _hoisted_40, [
+                _createElementVNode("div", {
+                  class: "strm-drawer-poster",
+                  style: _normalizeStyle(_unref(posterStyle)(current.value.title))
+                }, [
+                  (!posterFailed[current.value.path])
+                    ? (_openBlock(), _createElementBlock("img", {
+                        key: 0,
+                        class: "strm-poster-img",
+                        src: _unref(coverUrl)(props.api, props.pluginId, current.value),
+                        alt: current.value.title,
+                        onError: _cache[8] || (_cache[8] = $event => (markPosterFailed(current.value.path)))
+                      }, null, 40, _hoisted_41))
+                    : _createCommentVNode("", true)
+                ], 4),
+                _createElementVNode("div", _hoisted_42, [
+                  _createElementVNode("h2", null, _toDisplayString(current.value.title), 1),
+                  _createElementVNode("div", _hoisted_43, [
+                    _createElementVNode("span", null, _toDisplayString(current.value.type === 'tv' ? '电视剧' : '电影'), 1),
+                    _createElementVNode("span", null, _toDisplayString(current.value.total_files) + " 个文件", 1),
+                    _createElementVNode("span", null, "待刮削 " + _toDisplayString(current.value.unscraped), 1)
+                  ])
+                ]),
+                _createElementVNode("button", {
+                  class: "strm-close",
+                  onClick: closeDrawer
+                }, "×")
+              ]),
+              (current.value.type === 'tv')
+                ? (_openBlock(), _createElementBlock("div", _hoisted_44, [
+                    (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(seasons.value, (season) => {
+                      return (_openBlock(), _createElementBlock("button", {
+                        key: season.no,
+                        class: _normalizeClass(['strm-season-chip', String(season.no) === seasonKey.value && 'active']),
+                        onClick: $event => (seasonKey.value = String(season.no))
+                      }, [
+                        _createTextVNode(_toDisplayString(season.name) + " ", 1),
+                        _createElementVNode("em", null, _toDisplayString(season.files.length), 1)
+                      ], 10, _hoisted_45))
+                    }), 128)),
+                    _createElementVNode("div", { class: "strm-season-right" }, [
+                      _createElementVNode("button", {
+                        class: "strm-mini",
+                        onClick: selectAll
+                      }, "全选本季"),
+                      _createElementVNode("button", {
+                        class: "strm-mini",
+                        onClick: selectUnscraped
+                      }, "选中未刮削"),
+                      _createElementVNode("button", {
+                        class: "strm-mini",
+                        onClick: clearSelection
+                      }, "清空")
+                    ])
+                  ]))
+                : _createCommentVNode("", true),
+              _createElementVNode("div", _hoisted_46, [
+                (!rows.value.length)
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_47, "暂无文件"))
+                  : _createCommentVNode("", true),
+                (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(rows.value, (row) => {
+                  return (_openBlock(), _createElementBlock("div", {
+                    key: row.path,
+                    class: _normalizeClass(['strm-row', selected.value.has(row.path) && 'is-selected'])
+                  }, [
+                    _createElementVNode("input", {
+                      type: "checkbox",
+                      checked: selected.value.has(row.path),
+                      onChange: $event => (toggleRow(row.path))
+                    }, null, 40, _hoisted_48),
+                    _createElementVNode("span", _hoisted_49, _toDisplayString(current.value.type === 'tv' ? `E${String(row.episode ?? 0).padStart(2, '0')}` : (row.label || '')), 1),
+                    _createElementVNode("span", {
+                      class: "strm-row-name",
+                      title: row.name
+                    }, _toDisplayString(row.name), 9, _hoisted_50),
+                    _createElementVNode("span", _hoisted_51, _toDisplayString(_unref(formatSize)(row.size)), 1),
+                    _createElementVNode("span", {
+                      class: _normalizeClass(['strm-row-state', row.scraped ? 'is-ok' : 'is-none'])
+                    }, [
+                      _cache[19] || (_cache[19] = _createElementVNode("i", null, null, -1)),
+                      _createTextVNode(_toDisplayString(row.scraped ? '已刮削' : '未刮削'), 1)
+                    ], 2),
+                    _createElementVNode("button", {
+                      class: "strm-mini",
+                      disabled: busy.value,
+                      onClick: $event => (scrapeOne(row))
+                    }, "刮削", 8, _hoisted_52)
+                  ], 2))
+                }), 128))
+              ]),
+              _createElementVNode("div", _hoisted_53, [
+                _createElementVNode("span", _hoisted_54, [
+                  _cache[20] || (_cache[20] = _createTextVNode("已选 ", -1)),
+                  _createElementVNode("b", null, _toDisplayString(selectedRows.value.length), 1),
+                  _cache[21] || (_cache[21] = _createTextVNode(" 项", -1))
+                ]),
+                _createElementVNode("div", _hoisted_55, [
+                  _createElementVNode("button", {
+                    class: "strm-btn ghost",
+                    disabled: busy.value || !selectedRows.value.length,
+                    onClick: scrapeSelected
+                  }, " 刮削选中" + _toDisplayString(current.value.type === 'tv' ? '单集' : '版本'), 9, _hoisted_56),
+                  _createElementVNode("button", {
+                    class: "strm-btn",
+                    disabled: busy.value,
+                    onClick: scrapeWhole
+                  }, _toDisplayString(current.value.type === 'tv' ? '整剧重新刮削' : '整部重新刮削'), 9, _hoisted_57)
+                ])
+              ])
+            ], 64))
+          : _createCommentVNode("", true)
+      ], 2)
+    ], 8, ["to"]))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-da52fc9f"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-53b40a90"]]);
 
 export { AppPage as default };
