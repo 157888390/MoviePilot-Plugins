@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """LX 音源下载插件。
 
-通过自建 LX Sync Server 的 HTTP API 完成歌曲搜索、直链解析与下载，
-支持自定义下载位置，并通过远程命令 `/lx_search`、`/lx_download`、`/lx_stats` 响应请求。
+通过自建 LX Sync Server 的 HTTP API 完成歌曲搜索、歌单浏览、直链解析与下载，
+支持自定义下载位置，并通过远程命令 `/lx_search`、`/lx_download`、`/lx_playlist`、
+`/lx_stats` 响应请求。
 
 插件不再在本地运行洛雪自定义源 JavaScript，音源能力由服务端提供，
 因此运行环境不需要 Node.js。
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,18 +34,22 @@ MAX_CANDIDATES = 10
 # 音质降级优先级：请求的音质不可用时按此顺序挑最接近的
 QUALITY_PREFERENCE = ["flac24bit", "hires", "flac", "320k", "192k", "128k"]
 
+# 歌单整单下载的兜底上限。远程命令里一次性下载几千首没有意义，
+# 也会把消息渠道刷爆；确需全量请走「歌单浏览 → 勾选下载」。
+COMMAND_PLAYLIST_LIMIT = 50
+
 
 class LxMusicDownloader(_PluginBase):
     """LX 音源下载插件主类。"""
 
     plugin_name = "LX 音源下载"
-    plugin_desc = "调用自建 LX Sync Server，搜索歌曲并下载到自定义目录。"
+    plugin_desc = "调用自建 LX Sync Server，搜索歌曲、浏览歌单并下载到自定义目录。"
     # 自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图
     plugin_icon = (
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.0.0"
+    plugin_version = "3.1.0"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -85,6 +91,11 @@ class LxMusicDownloader(_PluginBase):
             self._max_results = max(1, min(int(config.get("max_results") or MAX_CANDIDATES), 50))
         except (TypeError, ValueError):
             self._max_results = MAX_CANDIDATES
+        try:
+            # 与服务端下载队列默认并发（3）保持一致，避免把上游音源打爆
+            self._playlist_concurrency = max(1, min(int(config.get("playlist_concurrency") or 3), 8))
+        except (TypeError, ValueError):
+            self._playlist_concurrency = 3
 
         if self._lock is None:
             self._lock = threading.Lock()
@@ -133,6 +144,13 @@ class LxMusicDownloader(_PluginBase):
                 "data": {"action": "lx_download"},
             },
             {
+                "cmd": "/lx_playlist",
+                "event": EventType.PluginAction,
+                "desc": "浏览/下载歌单",
+                "category": "音乐下载",
+                "data": {"action": "lx_playlist"},
+            },
+            {
                 "cmd": "/lx_stats",
                 "event": EventType.PluginAction,
                 "desc": "服务端缓存状态",
@@ -146,7 +164,7 @@ class LxMusicDownloader(_PluginBase):
         """只处理属于本插件的动作，其余动作直接返回。"""
         event_data = event.event_data or {}
         action = event_data.get("action")
-        if action not in ("lx_search", "lx_download", "lx_stats"):
+        if action not in ("lx_search", "lx_download", "lx_playlist", "lx_stats"):
             return
 
         if not self.get_state():
@@ -158,6 +176,10 @@ class LxMusicDownloader(_PluginBase):
         try:
             if action == "lx_stats":
                 self._reply(event, "服务端缓存", self._do_stats())
+                return
+
+            if action == "lx_playlist":
+                self._reply(event, "歌单", self._do_playlist(args))
                 return
 
             if not args:
@@ -207,6 +229,99 @@ class LxMusicDownloader(_PluginBase):
             song = songs[0]
 
         return self._download_song(song)
+
+    def _do_playlist(self, args: str) -> str:
+        """歌单远程命令。
+
+        - ``/lx_playlist 歌单名``      搜索歌单，列出候选
+        - ``/lx_playlist <链接或ID>``  查看歌单曲目
+        - ``/lx_playlist dl 歌单名``   下载前若干首
+        """
+        if not args:
+            client = self.get_client()
+            rows = client.songlist_list(source=self._source, sort_id="hot", page=1)
+            if not rows:
+                return f"「{self._source}」没有取到热门歌单。"
+            lines = [f"「{SUPPORTED_SOURCES.get(self._source, self._source)}」热门歌单（前 10）："]
+            for index, row in enumerate(rows[:10], start=1):
+                lines.append(f"{index}. {row.get('name')}  id={row.get('id')}")
+            lines.append("用法：/lx_playlist dl 歌单名｜/lx_playlist <歌单链接>")
+            return "\n".join(lines)
+
+        download_first = False
+        if args.lower().startswith(("dl ", "down ")):
+            download_first = True
+            args = args.split(" ", 1)[1].strip()
+        if not args:
+            return "用法：/lx_playlist dl 歌单名"
+
+        # 像链接/纯数字 ID 就直接当歌单标识，否则当关键词搜歌单
+        if self._looks_like_playlist_id(args):
+            playlist_id, source = args, self._source
+        else:
+            rows = self.get_client().songlist_search(args, source=self._source, page=1)
+            if not rows:
+                return f"「{self._source}」没有搜索到与「{args}」相关的歌单。"
+            if not download_first:
+                lines = [f"「{args}」匹配到 {len(rows)} 个歌单："]
+                for index, row in enumerate(rows[:10], start=1):
+                    author = row.get("author") or row.get("creator") or ""
+                    lines.append(f"{index}. {row.get('name')}（{author}）\n    id={row.get('id')}")
+                lines.append("下载：/lx_playlist dl " + args)
+                return "\n".join(lines)
+            playlist_id = str(rows[0].get("id") or "")
+            source = str(rows[0].get("source") or self._source)
+            if not playlist_id:
+                return f"歌单「{rows[0].get('name')}」没有返回 id，无法下载。"
+
+        if not download_first:
+            payload = self.fetch_playlist(playlist_id, source=source, max_songs=COMMAND_PLAYLIST_LIMIT)
+            info = payload.get("info") or {}
+            songs = payload["songs"]
+            lines = [
+                f"歌单：{info.get('name') or playlist_id}",
+                f"共 {payload.get('total') or len(songs)} 首"
+                + ("（仅显示前 50）" if payload.get("truncated") else ""),
+            ]
+            for index, song in enumerate(songs[:30], start=1):
+                lines.append(f"{index}. {song.get('name')} - {song.get('singer')}")
+            if len(songs) > 30:
+                lines.append(f"... 其余 {len(songs) - 30} 首请在插件页查看")
+            lines.append("下载前 50 首：/lx_playlist dl " + (info.get("name") or playlist_id))
+            return "\n".join(lines)
+
+        started = time.time()
+        result = self.download_playlist(
+            playlist_id,
+            source=source,
+            quality=self._quality,
+            concurrency=self._playlist_concurrency,
+            skip_existing=True,
+            limit=COMMAND_PLAYLIST_LIMIT,
+        )
+        lines = [
+            f"歌单「{result['name']}」下载完成，用时 {time.time() - started:.0f}s",
+            f"成功 {result['success']}｜跳过（已存在）{result['skipped']}｜失败 {result['failed']}"
+            f"｜共处理 {result['total']} 首",
+        ]
+        if result.get("limited"):
+            lines.append(f"（歌单共 {result.get('playlist_total')} 首，远程命令只处理前 {result['total']} 首）")
+        failures = [item for item in result["items"] if item["status"] == "failed"]
+        for item in failures[:8]:
+            lines.append(f"✗ {item['name']}：{item['message'][:80]}")
+        if len(failures) > 8:
+            lines.append(f"... 另有 {len(failures) - 8} 首失败，详见插件页")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _looks_like_playlist_id(value: str) -> bool:
+        """判断参数是歌单标识（URL 或纯数字 ID）而不是搜索关键词。"""
+        text = (value or "").strip()
+        if not text:
+            return False
+        if text.isdigit():
+            return True
+        return text.startswith(("http://", "https://")) or "/playlist/" in text or "/songlist/" in text
 
     def _download_song(self, song: dict, quality: Optional[str] = None) -> str:
         """解析直链并落盘，返回给用户的结果文案。quality 为空时用插件配置的音质。"""
@@ -336,13 +451,166 @@ class LxMusicDownloader(_PluginBase):
         return available[0]
 
     def _resolve_download_dir(self, song: Optional[dict] = None) -> Path:
-        """解析下载目录，未配置时回落到插件数据目录下的 music。"""
+        """解析下载目录，未配置时回落到插件数据目录下的 music。
+
+        歌单整单下载与单曲下载都落在同一个扁平目录：目录整理交给 MoviePilot
+        自身的媒体整理能力，插件不再自造一套分类规则，避免两边规则打架。
+        """
         base = Path(self._download_path).expanduser() if self._download_path else self.get_data_path() / "music"
         if self._subdir_by_artist and song:
             singer = (song.get("singer") or "").split("&")[0].strip()
             if singer:
                 base = base / LxDownloader.sanitize(singer)
         return base
+
+    # ------------------------------------------------------------------ #
+    #                          歌单整单下载                                #
+    # ------------------------------------------------------------------ #
+    def fetch_playlist(
+        self,
+        playlist_id: str,
+        source: str = "",
+        max_songs: int = 1000,
+    ) -> dict:
+        """拉取歌单全量曲目（含翻页），返回 ``{songs, info, total, ...}``。"""
+        source = (source or self._source or "wy").strip()
+        playlist_id = str(playlist_id or "").strip()
+        if not playlist_id:
+            raise LxServerError("缺少歌单 ID 或链接")
+        return self.get_client().songlist_all(playlist_id, source=source, max_songs=max_songs)
+
+    def download_playlist(
+        self,
+        playlist_id: str,
+        source: str = "",
+        quality: Optional[str] = None,
+        concurrency: int = 3,
+        skip_existing: bool = True,
+        max_songs: int = 1000,
+        limit: int = 0,
+    ) -> dict:
+        """整单下载：并发解析 + 落盘，逐首给出成功/失败明细。
+
+        ``limit > 0`` 时只取歌单前 N 首（远程命令用）。并发默认 3，与服务端
+        下载队列的默认并发保持一致，避免把上游打爆。
+        """
+        payload = self.fetch_playlist(playlist_id, source=source, max_songs=max_songs)
+        songs: list[dict] = payload["songs"]
+        if limit and limit > 0:
+            songs = songs[:limit]
+
+        info = payload.get("info") or {}
+        playlist_name = str(info.get("name") or "").strip()
+        if not playlist_name:
+            playlist_name = f"歌单 {playlist_id[:12]}"
+
+        if not songs:
+            return {
+                "name": playlist_name,
+                "total": 0,
+                "success": 0,
+                "failed": 0,
+                "skipped": 0,
+                "truncated": False,
+                "items": [],
+                "message": "歌单内没有可下载的歌曲",
+            }
+
+        # 目标目录对所有曲目都是一样的：扁平落盘，整理交给 MP 本体
+        target_dir = self._resolve_download_dir()
+        quality = quality or self._quality
+
+        workers = max(1, min(int(concurrency or 3), 8))
+        results: list[Optional[dict]] = [None] * len(songs)
+        cursor = threading.Lock()
+        next_index = 0
+
+        def consume() -> None:
+            nonlocal next_index
+            while True:
+                with cursor:
+                    if next_index >= len(songs):
+                        return
+                    position = next_index
+                    next_index += 1
+                results[position] = self._download_playlist_item(
+                    songs[position], position + 1, target_dir, quality, skip_existing
+                )
+
+        threads = [threading.Thread(target=consume, daemon=True) for _ in range(min(workers, len(songs)))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        items = [item for item in results if isinstance(item, dict)]
+        succeeded = [item for item in items if item["status"] == "ok"]
+        skipped = [item for item in items if item["status"] == "skipped"]
+        failed = [item for item in items if item["status"] == "failed"]
+
+        return {
+            "name": playlist_name,
+            "source": payload.get("source") or source,
+            "dir": str(target_dir),
+            "quality": quality,
+            "total": len(songs),
+            "playlist_total": payload.get("total", len(songs)),
+            "truncated": bool(payload.get("truncated")),
+            "limited": bool(limit and limit > 0 and payload.get("total", 0) > limit),
+            "success": len(succeeded),
+            "failed": len(failed),
+            "skipped": len(skipped),
+            "items": items,
+        }
+
+    def _download_playlist_item(
+        self,
+        song: dict,
+        index: int,
+        target_dir: Path,
+        quality: str,
+        skip_existing: bool,
+    ) -> dict:
+        """下载歌单里的单首，失败不抛出，转成一条明细记录。"""
+        name = str(song.get("name") or "未知歌曲")
+        singer = str(song.get("singer") or "")
+        if not self._use_server_cache:
+            try:
+                remain = self._remaining_playlist_file(song, target_dir)
+                if remain is not None and skip_existing:
+                    return {
+                        "index": index, "name": name, "singer": singer,
+                        "status": "skipped", "message": "目标目录已有同名文件",
+                    }
+            except Exception as err:  # noqa: BLE001
+                logger.warn(f"歌单下载去重检查失败（{name}）：{err}")
+
+        try:
+            message = self._download_song(song, quality)
+        except LxServerError as err:
+            logger.warn(f"歌单第 {index} 首《{name}》下载失败：{err}")
+            return {"index": index, "name": name, "singer": singer, "status": "failed", "message": str(err)}
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"歌单第 {index} 首《{name}》下载异常：{err}")
+            return {"index": index, "name": name, "singer": singer, "status": "failed", "message": str(err)}
+
+        return {"index": index, "name": name, "singer": singer, "status": "ok", "message": message.splitlines()[0]}
+
+    def _remaining_playlist_file(self, song: dict, target_dir: Path) -> Optional[Path]:
+        """按当前文件名模板推算目标文件是否已存在，用于整单下载去重。
+
+        扩展名由响应内容决定，这里无法预知，因此用「主干名 + 任意音频后缀」
+        匹配。名称模板带 songmid 时不会碰撞；若不带，同一首歌重复下载会被
+        判定为已存在——这正是整单下载想要的效果（幂等）。
+        """
+        base_name = LxDownloader.build_filename(song, self._name_template)
+        if not base_name or base_name == "unknown":
+            return None
+        for suffix in (".mp3", ".flac", ".m4a", ".ogg", ".ape", ".wav", ".dts"):
+            candidate = target_dir / f"{base_name}{suffix}"
+            if candidate.exists():
+                return candidate
+        return None
 
     # ------------------------------------------------------------------ #
     #                            定时任务                                  #
@@ -544,6 +812,21 @@ class LxMusicDownloader(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "playlist_concurrency",
+                                            "label": "歌单下载并发",
+                                            "type": "number",
+                                            "placeholder": "1-8，默认 3",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
@@ -624,6 +907,7 @@ class LxMusicDownloader(_PluginBase):
             "download_path": "",
             "name_template": "{name} - {singer}",
             "max_results": MAX_CANDIDATES,
+            "playlist_concurrency": 3,
             "subdir_by_artist": True,
             "save_cover": False,
             "embed_tag": True,
@@ -722,6 +1006,34 @@ class LxMusicDownloader(_PluginBase):
                 "summary": "下载歌曲（可传完整 song 或 keyword）",
             },
             {
+                "path": "/playlist/list",
+                "endpoint": self.api_playlist_list,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "浏览歌单（标签/关键词）",
+            },
+            {
+                "path": "/playlist/tags",
+                "endpoint": self.api_playlist_tags,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "歌单标签与排序方式",
+            },
+            {
+                "path": "/playlist/detail",
+                "endpoint": self.api_playlist_detail,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "歌单详情（含曲目列表）",
+            },
+            {
+                "path": "/playlist/download",
+                "endpoint": self.api_playlist_download,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "整单下载歌单",
+            },
+            {
                 "path": "/stats",
                 "endpoint": self.api_stats,
                 "methods": ["GET"],
@@ -769,6 +1081,7 @@ class LxMusicDownloader(_PluginBase):
                 "quality": getattr(self, "_quality", ""),
                 "download_dir": str(self._resolve_download_dir()),
                 "max_results": getattr(self, "_max_results", MAX_CANDIDATES),
+                "playlist_concurrency": getattr(self, "_playlist_concurrency", 3),
                 "sidebar_enabled": bool(getattr(self, "_sidebar_enabled", True)),
                 "auth_state": auth_state,
                 "auth_text": auth_text,
@@ -852,3 +1165,96 @@ class LxMusicDownloader(_PluginBase):
             return self._fail(err)
         except Exception as err:  # noqa: BLE001
             return self._fail(err)
+
+    # ------------------------------------------------------------------ #
+    #                            歌单接口                                  #
+    # ------------------------------------------------------------------ #
+    async def api_playlist_list(self, keyword: str = "", source: str = "",
+                                tag_id: str = "", sort_id: str = "hot",
+                                page: int = 1) -> dict[str, Any]:
+        """浏览歌单：给了 keyword 就搜索，否则按标签/热门列表取。"""
+        src = source or self._source or "wy"
+        try:
+            client = self.get_client()
+            if keyword.strip():
+                rows = client.songlist_search(keyword.strip(), source=src, page=page)
+            else:
+                rows = client.songlist_list(source=src, tag_id=tag_id, sort_id=sort_id, page=page)
+            return {"success": True, "data": rows}
+        except LxServerError as err:
+            return {"success": False, "message": str(err), "data": []}
+        except Exception as err:  # noqa: BLE001
+            return {"success": False, "message": str(err), "data": []}
+
+    async def api_playlist_tags(self, source: str = "") -> dict[str, Any]:
+        """歌单标签与排序方式。"""
+        try:
+            return {"success": True, "data": self.get_client().songlist_tags(source=source or self._source or "wy")}
+        except LxServerError as err:
+            return self._fail(err)
+        except Exception as err:  # noqa: BLE001
+            return self._fail(err)
+
+    async def api_playlist_detail(self, playlist_id: str = "", id: str = "",
+                                  source: str = "", max_songs: int = 1000) -> dict[str, Any]:
+        """取歌单详情（含全量曲目，自动翻页）。"""
+        target = (playlist_id or id or "").strip()
+        if not target:
+            return {"success": False, "message": "缺少歌单 ID 或链接"}
+        try:
+            limit = max(1, min(int(max_songs or 1000), 5000))
+        except (TypeError, ValueError):
+            limit = 1000
+        try:
+            return {"success": True, "data": self.fetch_playlist(target, source=source, max_songs=limit)}
+        except LxServerError as err:
+            return self._fail(err)
+        except Exception as err:  # noqa: BLE001
+            return self._fail(err)
+
+    async def api_playlist_download(self, payload: dict = Body(default=None)) -> dict[str, Any]:
+        """整单下载歌单。
+
+        入参：
+        - ``playlist_id`` 歌单链接或 ID（必填）
+        - ``songs``       前端已拿到的曲目数组；不传则服务端重新拉取整个歌单
+        - ``source``      音源平台
+        - ``quality``     目标音质，缺省用插件配置
+        - ``limit``       只下载前 N 首，0 表示不限
+        - ``concurrency`` 并发数，缺省用插件配置
+        - ``skip_existing`` 是否跳过目标目录已有同名文件，默认 True
+        """
+        data = payload or {}
+        playlist_id = str(data.get("playlist_id") or data.get("id") or "").strip()
+        if not playlist_id:
+            return {"success": False, "message": "缺少 playlist_id 参数"}
+        try:
+            concurrency = data.get("concurrency")
+            concurrency = self._playlist_concurrency if concurrency in (None, "") else int(concurrency)
+        except (TypeError, ValueError):
+            concurrency = self._playlist_concurrency
+        try:
+            limit = int(data.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+
+        try:
+            result = self.download_playlist(
+                playlist_id,
+                source=str(data.get("source") or ""),
+                quality=data.get("quality"),
+                concurrency=concurrency,
+                skip_existing=bool(data.get("skip_existing", True)),
+                limit=max(0, limit),
+            )
+        except LxServerError as err:
+            return self._fail(err)
+        except Exception as err:  # noqa: BLE001
+            return self._fail(err)
+
+        summary = (
+            f"《{result['name']}》：成功 {result['success']}｜"
+            f"跳过 {result['skipped']}（已存在）｜失败 {result['failed']}｜共 {result['total']} 首。\n"
+            f"目录：{result.get('dir')}"
+        )
+        return {"success": True, "message": summary, "data": result}

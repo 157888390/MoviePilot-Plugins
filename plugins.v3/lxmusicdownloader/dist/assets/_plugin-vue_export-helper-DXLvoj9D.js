@@ -17,6 +17,26 @@ const QUALITIES = [
   { value: 'hires', label: 'hires' },
 ];
 
+/**
+ * 平台对歌单各方法的支持矩阵，与服务端 lxserver.py 的 SONGLIST_CAPABILITY 保持一致。
+ * 酷我（kw）没有 search；不支持的方法服务端会直接抛 500，这里提前挡掉。
+ */
+const SONGLIST_CAPABILITY = {
+  wy: ['tags', 'list', 'detail', 'search'],
+  tx: ['tags', 'list', 'detail', 'search'],
+  kg: ['tags', 'list', 'detail', 'search'],
+  kw: ['tags', 'list', 'detail'],
+  mg: ['tags', 'list', 'detail', 'search'],
+  bd: ['tags', 'list', 'detail'],
+};
+
+/** 该平台是否支持某个歌单方法；未收录的平台放行，交给服务端判定 */
+function supportsSongList(source, method) {
+  const caps = SONGLIST_CAPABILITY[String(source || '').toLowerCase()];
+  if (!caps) return true
+  return caps.includes(method)
+}
+
 /** 组装注入的 API 客户端调用，自动补 plugin/<id> 前缀 */
 function makeApiCall(api, pluginId) {
   return (method, path, payload) => {
@@ -65,6 +85,27 @@ function coverOf(song) {
   return song?.img || ''
 }
 
+/** 歌单封面：服务端字段名不统一（img / cover / picUrl），统一收口 */
+function playlistCoverOf(playlist) {
+  return playlist?.img || playlist?.cover || playlist?.picUrl || ''
+}
+
+/** 歌单标识：详情接口对 id 与 source 都敏感，取不到 id 时回落到 link */
+function playlistIdOf(playlist) {
+  return String(playlist?.id || playlist?.listId || playlist?.link || '')
+}
+
+/** 歌单作者：不同平台字段名不同 */
+function playlistAuthorOf(playlist) {
+  return playlist?.author || playlist?.creator || playlist?.nickname || playlist?.userName || '未知作者'
+}
+
+/** 歌单曲目数：播放量字段各平台命名差异很大，只取确定存在的那个 */
+function playlistCountOf(playlist) {
+  const raw = playlist?.trackCount ?? playlist?.songCount ?? playlist?.total ?? playlist?.play_count;
+  return raw === undefined || raw === null ? '' : String(raw)
+}
+
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
   for (const [key, val] of props) {
@@ -73,4 +114,4 @@ const _export_sfc = (sfc, props) => {
   return target;
 };
 
-export { QUALITIES as Q, SOURCES as S, _export_sfc as _, singerOf as a, bodyOf as b, coverOf as c, formatSize as f, makeApiCall as m, qualitiesOf as q, songKey as s, unwrap as u };
+export { QUALITIES as Q, SOURCES as S, _export_sfc as _, singerOf as a, playlistCountOf as b, coverOf as c, playlistIdOf as d, playlistCoverOf as e, formatSize as f, bodyOf as g, supportsSongList as h, makeApiCall as m, playlistAuthorOf as p, qualitiesOf as q, songKey as s, unwrap as u };

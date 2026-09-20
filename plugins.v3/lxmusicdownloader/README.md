@@ -1,6 +1,6 @@
 # LX 音源下载（LxMusicDownloader）
 
-在 MoviePilot V3 里搜索歌曲并下载到自定义目录。音源能力由自建的 **LX Sync Server** 通过
+在 MoviePilot V3 里搜索歌曲、浏览歌单并下载到自定义目录。音源能力由自建的 **LX Sync Server** 通过
 HTTP API 提供，插件本身不运行洛雪自定义源 JavaScript，**运行环境不需要 Node.js**。
 
 ## 目录结构
@@ -75,6 +75,52 @@ npm run build          # 产出 dist/，需一并提交
 | 解析直链 | `POST /api/music/url` `{songInfo, quality}` |
 | 代理下载 | `GET /api/music/download?url=&filename=&tag=1&name=&singer=&album=&pic=` |
 | 服务端缓存 | `POST /api/music/cache/download`、`GET /api/music/cache/stats` |
+| 歌单标签 | `GET /api/music/songList/tags?source=` |
+| 浏览歌单 | `GET /api/music/songList/list?source=&tagId=&sortId=hot&page=` |
+| 歌单详情 | `GET /api/music/songList/detail?id=&source=&page=` |
+| 搜索歌单 | `GET /api/music/songList/search?text=&source=&page=` |
+
+## 歌单（实测）
+
+**歌单与自定义音源脚本无关**，全部由服务端内置 `musicSdk` 提供，因此直链解析不可用时
+歌单浏览仍然可用。
+
+### 平台能力矩阵
+
+服务端对不支持的方法**不做优雅降级**，直接抛 `Source X does not support songList`（HTTP 500）。
+插件侧按同一张表前置校验，翻译成「该平台不支持 XX 操作，请更换音源平台」：
+
+| 平台 | tags | list | detail | search |
+| --- | --- | --- | --- | --- |
+| `wy` 网易云 | ✅ | ✅ | ✅ | ✅ |
+| `tx` QQ 音乐 | ✅ | ✅ | ✅ | ✅ |
+| `kg` 酷狗 | ✅ | ✅ | ✅ | ✅ |
+| `kw` 酷我 | ✅ | ✅ | ✅ | ❌ |
+| `mg` 咪咕 | ✅ | ✅ | ✅ | ✅ |
+| `bd` 百度 | ✅ | ✅ | ✅ | ❌ |
+
+### 关键行为
+
+1. **`detail` 可直接传歌单链接**。各平台模块用正则从 URL 提取 id：`wy` 支持
+   `?id=123`、`/playlist/123/1/` 与短链；`tx` 支持 `/playlist/123`；`kg` 支持
+   `/songlist/xxx/`、`?global_collection_id=`、`?chain=` 等多种形态。网易云还支持
+   **`id###MUSIC_U值`** 写法注入 cookie，用于访问需登录的私密歌单。
+2. **必须翻页**。`wy` 单页 1000 首，其余平台多为 30 首。`songlist_all()` 循环翻页直到
+   `page * limit >= total`，并以 `max_songs` 兜底（服务端存在 `limit_song=100000` 的极端场景）。
+3. **歌单内每首歌已带齐解析所需字段**（`source`、`songmid`/`hash`、`singer`、`albumName`、
+   `interval`、`img`、`types`），所以拿到曲目列表后可直接逐首 `POST /api/music/url`。
+4. `types` / `_types` 是该歌**实际可用**的音质（kg 的 `_types` 还含各音质独立 `hash`），
+   插件据此在请求前做音质降级，避免无效请求。
+
+### 整单下载
+
+- 前端「歌单」标签页：热门/搜索歌单列表 → 点开详情 → 全选或勾选 → 下载。
+- 落到与单曲下载**同一个扁平目录**（`download_path` 或插件数据目录下 `music`），
+  **不再按歌单名另建子目录**——目录整理交给 MoviePilot 本体，避免两套规则打架；
+  `subdir_by_artist` 也只在单曲下载路径生效。
+- 并发线程池按 `playlist_concurrency` 执行（默认 3，与服务端下载队列默认一致），
+  下载前用「文件名模板 + 任意音频后缀」探测目标目录，**已存在则跳过**，整单下载幂等。
+- 逐首返回 `ok / skipped / failed` 明细，失败不影响其余曲目。
 
 ## 已知的接口行为（实测）
 
@@ -146,15 +192,25 @@ SDK 内置重试 5 次后直接 `reject(new Error('搜索失败'))`，与账号�
 | `/lx_search 歌曲名` | 搜索并列出候选（含各条可用音质） |
 | `/lx_download 序号` | 按上一次搜索结果的序号下载 |
 | `/lx_download 歌手 - 歌名` | 直接搜索第一首并下载 |
+| `/lx_playlist` | 列出当前平台热门歌单 |
+| `/lx_playlist 歌单名` | 搜索歌单；参数是链接或纯数字 ID 时直接展示曲目 |
+| `/lx_playlist dl 歌单名` | 下载该歌单前 50 首（`COMMAND_PLAYLIST_LIMIT`） |
 | `/lx_stats` | 查看服务端缓存统计 |
 
 ## 插件 API
 
 基础路径：`/api/v1/plugin/LxMusicDownloader`
 
+- `GET /overview` — 运行状态总览（含 `playlist_concurrency`）
+- `GET /verify` — 校验服务端凭据
 - `GET /search?keyword=稻香&limit=10`
-- `POST /download` body: `{"keyword": "稻香"}`
+- `POST /resolve` body: `{"song": {...}, "quality": "flac"}`
+- `POST /download` body: `{"keyword": "稻香"}`（或直接回传完整 `song`）
 - `GET /stats`
+- `GET /playlist/list?keyword=&source=&tag_id=&sort_id=hot&page=1` — 有关键词则搜索，否则按标签/热门
+- `GET /playlist/tags?source=`
+- `GET /playlist/detail?playlist_id=<链接或ID>&source=&max_songs=1000` — 自动翻页拉全量
+- `POST /playlist/download` body: `{"playlist_id": "...", "source": "wy", "quality": "flac", "concurrency": 3, "limit": 0, "skip_existing": true}`
 
 ## 配置项
 
@@ -168,7 +224,8 @@ SDK 内置重试 5 次后直接 `reject(new Error('搜索失败'))`，与账号�
 | `download_path` | 下载位置，留空使用插件数据目录下的 `music` |
 | `name_template` | 文件名模板，支持 `{name} {singer} {album} {source} {songmid}` |
 | `max_results` | 搜索结果条数 |
-| `subdir_by_artist` | 是否按歌手建立子目录 |
+| `playlist_concurrency` | 歌单整单下载并发（1-8，默认 3） |
+| `subdir_by_artist` | 是否按歌手建立子目录（仅单曲下载路径生效） |
 | `save_cover` | 是否额外保存封面图 |
 | `embed_tag` | 下载时带 `tag=1`，由服务端注入 ID3 标签（封面/标题/艺术家/专辑），不改变音频本体 |
 | `embed_lyric` | 额外带 `lyric=1`，把歌词写入 `USLT` 帧；需 `embed_tag` 同时开启。建议开启，失败会自动降级 |
@@ -180,3 +237,7 @@ SDK 内置重试 5 次后直接 `reject(new Error('搜索失败'))`，与账号�
 - 落盘使用 `.part` 临时文件 + 原子替换；内容小于 4KB 判定失败并删除。
 - 定时服务每天 09:00 校验一次凭据，token 失效时发出通知。
 - 配置变更后 `init_plugin()` 会丢弃旧客户端，避免继续用上一份凭据。
+- 歌单整单下载用线程池并发，去重靠「目标目录已存在同名文件」判定，**不依赖服务端**；
+  单首失败只记明细不中断整批。
+- 去重按文件名模板匹配，因此模板里带 `{songmid}` 时最准确；不带时同名不同版本可能被跳过，
+  这正是整单重复下载想要的幂等效果。

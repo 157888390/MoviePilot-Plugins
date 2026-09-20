@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, m as makeApiCall, f as formatSize, u as unwrap } from './_plugin-vue_export-helper-CcgWpvTR.js';
+import { _ as _export_sfc, m as makeApiCall, f as formatSize, u as unwrap } from './_plugin-vue_export-helper-DXLvoj9D.js';
 
 const {toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,createElementVNode:_createElementVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,unref:_unref,createStaticVNode:_createStaticVNode} = await importShared('vue');
 
@@ -23,6 +23,7 @@ const _hoisted_13 = { class: "pg-line" };
 const _hoisted_14 = { class: "pg-line" };
 const _hoisted_15 = { class: "pg-line" };
 const _hoisted_16 = { class: "pg-line" };
+const _hoisted_17 = { class: "pg-line" };
 
 const {onMounted,ref} = await importShared('vue');
 
@@ -119,16 +120,20 @@ return (_ctx, _cache) => {
         _createElementVNode("b", null, _toDisplayString(overview.value.max_results || '-'), 1)
       ]),
       _createElementVNode("div", _hoisted_16, [
-        _cache[8] || (_cache[8] = _createElementVNode("span", null, "侧栏入口", -1)),
+        _cache[8] || (_cache[8] = _createElementVNode("span", null, "歌单并发", -1)),
+        _createElementVNode("b", null, _toDisplayString(overview.value.playlist_concurrency || 3), 1)
+      ]),
+      _createElementVNode("div", _hoisted_17, [
+        _cache[9] || (_cache[9] = _createElementVNode("span", null, "侧栏入口", -1)),
         _createElementVNode("b", null, _toDisplayString(overview.value.sidebar_enabled ? '已开启' : '已关闭'), 1)
       ])
     ]),
-    _cache[9] || (_cache[9] = _createStaticVNode("<div class=\"pg-commands\" data-v-be018957><div class=\"pg-commands-title\" data-v-be018957>远程命令</div><div class=\"pg-cmd\" data-v-be018957><code data-v-be018957>/lx_search 歌曲名</code><span data-v-be018957>搜索并列出候选</span></div><div class=\"pg-cmd\" data-v-be018957><code data-v-be018957>/lx_download 序号</code><span data-v-be018957>按上次搜索序号下载</span></div><div class=\"pg-cmd\" data-v-be018957><code data-v-be018957>/lx_download 歌手 - 歌名</code><span data-v-be018957>直接搜索首条并下载</span></div><div class=\"pg-cmd\" data-v-be018957><code data-v-be018957>/lx_stats</code><span data-v-be018957>查看服务端缓存统计</span></div></div>", 1))
+    _cache[10] || (_cache[10] = _createStaticVNode("<div class=\"pg-commands\" data-v-cb70a03f><div class=\"pg-commands-title\" data-v-cb70a03f>远程命令</div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_search 歌曲名</code><span data-v-cb70a03f>搜索并列出候选</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_download 序号</code><span data-v-cb70a03f>按上次搜索序号下载</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_download 歌手 - 歌名</code><span data-v-cb70a03f>直接搜索首条并下载</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_playlist 歌单名</code><span data-v-cb70a03f>搜索歌单 / 粘贴链接查看曲目</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_playlist dl 歌单名</code><span data-v-cb70a03f>下载歌单前 50 首</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_stats</code><span data-v-cb70a03f>查看服务端缓存统计</span></div></div>", 1))
   ]))
 }
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-be018957"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-cb70a03f"]]);
 
 export { Page as default };

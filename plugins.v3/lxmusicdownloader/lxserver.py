@@ -12,7 +12,14 @@
 - ``GET  /api/music/download``              代理下载，``tag=1`` 注入 ID3，响应为二进制流
 - ``POST /api/music/cache/download``        服务端缓存下载
 - ``GET  /api/music/cache/stats``           缓存统计
+- ``GET  /api/music/songList/tags``         歌单标签
+- ``GET  /api/music/songList/list``         按标签浏览歌单
+- ``GET  /api/music/songList/detail``       歌单详情（含曲目列表）
+- ``GET  /api/music/songList/search``       搜索歌单
 - ``GET  /api/custom-source/list``          已启用的自定义音源（用于诊断 500 错误）
+
+歌单相关的 5 个接口全部由服务端内置 musicSdk 提供，**与自定义音源脚本无关**，
+因此即使直链解析不可用，歌单浏览仍然可用。
 """
 
 from __future__ import annotations
@@ -45,6 +52,23 @@ SUPPORTED_SOURCES = {
     "wy": "网易云",
     "mg": "咪咕",
 }
+
+# 平台对 songList 各方法的支持矩阵。服务端对不支持的方法**不做优雅降级**，
+# 直接抛 `Source X does not support songList`（HTTP 500），所以插件侧先挡掉，
+# 免得让用户看到一句无从下手的报错。
+SONGLIST_CAPABILITY = {
+    # platform: (tags, list, detail, search)
+    "wy": ("tags", "list", "detail", "search"),
+    "tx": ("tags", "list", "detail", "search"),
+    "kg": ("tags", "list", "detail", "search"),
+    "kw": ("tags", "list", "detail"),
+    "mg": ("tags", "list", "detail", "search"),
+    "bd": ("tags", "list", "detail"),
+}
+
+# 各平台歌单详情单页条数：wy 为 1000，其余多为 30。翻页步长按此估算，
+# 真实条数仍以响应里的 limit/total 为准。
+SONGLIST_PAGE_SIZE = {"wy": 1000}
 
 HTTP_HINTS = {
     401: "鉴权失败：x-user-name 与 x-user-token 必须成对提供，且 token 需与用户名匹配",
@@ -276,6 +300,131 @@ class LxServerClient:
         if not isinstance(data, dict):
             raise LxServerError(f"直链解析响应异常：{str(data)[:200]}")
         return data
+
+    # ------------------------------------------------------------------ #
+    #                              歌单                                    #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def supports(source: str, method: str) -> bool:
+        """该平台是否支持某个 songList 方法。未收录的平台一律放行，交给服务端判定。"""
+        capabilities = SONGLIST_CAPABILITY.get(str(source or "").lower())
+        if capabilities is None:
+            return True
+        return method in capabilities
+
+    def _songlist_get(self, path: str, params: dict, source: str, method: str) -> Any:
+        """统一的 songList 请求入口，把平台不支持翻译成人话。"""
+        if not self.supports(source, method):
+            label = SUPPORTED_SOURCES.get(source, source)
+            raise LxServerError(f"{label}（{source}）不支持「{method}」歌单操作，请更换音源平台")
+        return self._get(path, params=params)
+
+    def songlist_tags(self, source: str = "wy") -> dict:
+        """歌单标签与排序方式列表。"""
+        data = self._songlist_get(
+            "/api/music/songList/tags", {"source": source}, source, "tags"
+        )
+        return data if isinstance(data, dict) else {"raw": data}
+
+    def songlist_list(
+        self,
+        source: str = "wy",
+        tag_id: str = "",
+        sort_id: str = "hot",
+        page: int = 1,
+    ) -> list[dict]:
+        """按标签浏览歌单。返回的每项是歌单摘要（含 id / name / img）。"""
+        data = self._songlist_get(
+            "/api/music/songList/list",
+            {"source": source, "tagId": tag_id, "sortId": sort_id or "hot", "page": page},
+            source,
+            "list",
+        )
+        return self._as_songlist(data)
+
+    def songlist_search(self, text: str, source: str = "wy", page: int = 1) -> list[dict]:
+        """按关键词搜索歌单。返回的每项是歌单摘要。"""
+        data = self._songlist_get(
+            "/api/music/songList/search",
+            {"text": text, "source": source, "page": page},
+            source,
+            "search",
+        )
+        return self._as_songlist(data)
+
+    def songlist_detail(self, playlist_id: str, source: str = "wy", page: int = 1) -> dict:
+        """取歌单详情（含曲目列表）。
+
+        ``playlist_id`` 既可以是纯 id，也可以是歌单链接——各平台模块会用正则
+        从 URL 里提取 id（wy 还支持 ``id###token`` 注入 cookie 访问私密歌单）。
+        """
+        data = self._songlist_get(
+            "/api/music/songList/detail",
+            {"id": playlist_id, "source": source, "page": page},
+            source,
+            "detail",
+        )
+        if not isinstance(data, dict):
+            raise LxServerError(f"歌单详情响应异常：{str(data)[:200]}")
+        return data
+
+    def songlist_all(self, playlist_id: str, source: str = "wy", max_songs: int = 1000) -> dict:
+        """翻页拉取歌单全量曲目。
+
+        wy 单页 1000 首、其余平台多为 30 首，大歌单必须循环翻页直到
+        ``page * limit >= total``。``max_songs`` 是安全上限，防止超大歌单把
+        插件拖死（服务端有一个 limit_song=100000 的极端场景）。
+        """
+        first = self.songlist_detail(playlist_id, source=source, page=1)
+        songs = [item for item in (first.get("list") or []) if isinstance(item, dict)]
+        info = first.get("info") if isinstance(first.get("info"), dict) else {}
+
+        try:
+            total = int(first.get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        try:
+            limit = int(first.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            limit = SONGLIST_PAGE_SIZE.get(source, 30)
+
+        page = 1
+        while total > 0 and len(songs) < min(total, max_songs):
+            page += 1
+            chunk = self.songlist_detail(playlist_id, source=source, page=page)
+            batch = [item for item in (chunk.get("list") or []) if isinstance(item, dict)]
+            if not batch:
+                break
+            songs.extend(batch)
+            # 服务端给的 limit 可能与实际返回条数不符，用实际值兜底防死循环
+            if len(batch) < limit:
+                break
+
+        if len(songs) > max_songs:
+            songs = songs[:max_songs]
+
+        return {
+            "songs": songs,
+            "info": info,
+            "total": total or len(songs),
+            "truncated": bool(total and total > len(songs)),
+            "source": source,
+            "id": str(playlist_id),
+        }
+
+    @staticmethod
+    def _as_songlist(data: Any) -> list[dict]:
+        """把 songList/list 与 search 的响应归一化成歌单摘要数组。"""
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            for key in ("list", "data", "result"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
 
     def open_download(self, play_url: str, filename: str, song_info: dict, embed_tag: bool = True, embed_lyric: bool = False):
         """以流式方式打开代理下载，需在 with 语句中使用。
