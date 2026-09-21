@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import ConfigPanel from './__federation_expose_Config-Dm5XXrUc.js';
+import ConfigPanel from './__federation_expose_Config-QyqzE2sC.js';
 import { _ as _export_sfc, m as makeApiCall, f as formatSize, S as SOURCES, Q as QUALITIES, s as songKey, c as coverOf, a as singerOf, q as qualitiesOf, p as playlistAuthorOf, b as playlistCountOf, d as playlistIdOf, e as playlistCoverOf, g as bodyOf, u as unwrap, h as supportsSongList } from './_plugin-vue_export-helper-DXLvoj9D.js';
 
 const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,unref:_unref,vModelText:_vModelText,withKeys:_withKeys,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,createTextVNode:_createTextVNode,vModelCheckbox:_vModelCheckbox,createVNode:_createVNode,withModifiers:_withModifiers,Teleport:_Teleport,createBlock:_createBlock} = await importShared('vue');

@@ -37,8 +37,9 @@ const _hoisted_24 = { class: "cfg-switch" };
 const _hoisted_25 = { class: "cfg-switch" };
 const _hoisted_26 = { class: "cfg-switch" };
 const _hoisted_27 = { class: "cfg-switch" };
-const _hoisted_28 = { class: "cfg-foot" };
-const _hoisted_29 = ["disabled"];
+const _hoisted_28 = { class: "cfg-switch" };
+const _hoisted_29 = { class: "cfg-foot" };
+const _hoisted_30 = ["disabled"];
 
 const {reactive,ref,watch} = await importShared('vue');
 
@@ -76,6 +77,7 @@ const DEFAULTS = {
   embed_lyric: true,
   use_server_cache: false,
   sidebar_enabled: true,
+  split_artists: true,
 };
 
 const config = reactive({ ...DEFAULTS });
@@ -127,7 +129,7 @@ async function testConnection() {
 return (_ctx, _cache) => {
   return (_openBlock(), _createElementBlock("div", _hoisted_1, [
     _createElementVNode("div", { class: "cfg-head" }, [
-      _cache[17] || (_cache[17] = _createElementVNode("h2", null, "LX 音源下载配置", -1)),
+      _cache[18] || (_cache[18] = _createElementVNode("h2", null, "LX 音源下载配置", -1)),
       _createElementVNode("button", {
         class: "cfg-close",
         onClick: close
@@ -139,7 +141,7 @@ return (_ctx, _cache) => {
         : (notice.value)
           ? (_openBlock(), _createElementBlock("div", _hoisted_4, _toDisplayString(notice.value), 1))
           : _createCommentVNode("", true),
-      _cache[35] || (_cache[35] = _createElementVNode("div", { class: "cfg-section" }, "运行状态", -1)),
+      _cache[37] || (_cache[37] = _createElementVNode("div", { class: "cfg-section" }, "运行状态", -1)),
       _createElementVNode("div", _hoisted_5, [
         _createElementVNode("label", _hoisted_6, [
           _withDirectives(_createElementVNode("input", {
@@ -148,7 +150,7 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.enabled]
           ]),
-          _cache[18] || (_cache[18] = _createElementVNode("span", null, [
+          _cache[19] || (_cache[19] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "启用插件"),
             _createElementVNode("em", null, "关闭后远程命令与接口不再响应")
           ], -1))
@@ -160,15 +162,15 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.sidebar_enabled]
           ]),
-          _cache[19] || (_cache[19] = _createElementVNode("span", null, [
+          _cache[20] || (_cache[20] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "显示侧栏入口"),
             _createElementVNode("em", null, "在主界面左侧导航栏显示「LX 音源下载」，关闭后仍可从插件中心进入")
           ], -1))
         ])
       ]),
-      _cache[36] || (_cache[36] = _createElementVNode("div", { class: "cfg-section" }, "服务端", -1)),
+      _cache[38] || (_cache[38] = _createElementVNode("div", { class: "cfg-section" }, "服务端", -1)),
       _createElementVNode("div", _hoisted_8, [
-        _cache[20] || (_cache[20] = _createElementVNode("span", { class: "cfg-label" }, "LX 服务端地址", -1)),
+        _cache[21] || (_cache[21] = _createElementVNode("span", { class: "cfg-label" }, "LX 服务端地址", -1)),
         _withDirectives(_createElementVNode("input", {
           "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((config.host) = $event)),
           class: "cfg-input",
@@ -179,7 +181,7 @@ return (_ctx, _cache) => {
       ]),
       _createElementVNode("div", _hoisted_9, [
         _createElementVNode("div", _hoisted_10, [
-          _cache[21] || (_cache[21] = _createElementVNode("span", { class: "cfg-label" }, "用户名", -1)),
+          _cache[22] || (_cache[22] = _createElementVNode("span", { class: "cfg-label" }, "用户名", -1)),
           _withDirectives(_createElementVNode("input", {
             "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((config.username) = $event)),
             class: "cfg-input",
@@ -189,7 +191,7 @@ return (_ctx, _cache) => {
           ])
         ]),
         _createElementVNode("div", _hoisted_11, [
-          _cache[22] || (_cache[22] = _createElementVNode("span", { class: "cfg-label" }, "密码", -1)),
+          _cache[23] || (_cache[23] = _createElementVNode("span", { class: "cfg-label" }, "密码", -1)),
           _withDirectives(_createElementVNode("input", {
             "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((config.password) = $event)),
             class: "cfg-input",
@@ -201,7 +203,7 @@ return (_ctx, _cache) => {
         ])
       ]),
       _createElementVNode("div", _hoisted_12, [
-        _cache[23] || (_cache[23] = _createElementVNode("span", { class: "cfg-label" }, "持久化 Token", -1)),
+        _cache[24] || (_cache[24] = _createElementVNode("span", { class: "cfg-label" }, "持久化 Token", -1)),
         _withDirectives(_createElementVNode("input", {
           "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((config.token) = $event)),
           class: "cfg-input",
@@ -210,11 +212,11 @@ return (_ctx, _cache) => {
           [_vModelText, config.token]
         ])
       ]),
-      _cache[37] || (_cache[37] = _createElementVNode("p", { class: "cfg-tip" }, " 下载直链解析依赖「用户名 + token」定位自定义音源：只填 token 不填用户名会退回公开用户并报「未找到支持 xx 平台的自定义源」。 只填账号密码时会自动登录换取 token。 ", -1)),
-      _cache[38] || (_cache[38] = _createElementVNode("div", { class: "cfg-section" }, "下载", -1)),
+      _cache[39] || (_cache[39] = _createElementVNode("p", { class: "cfg-tip" }, " 下载直链解析依赖「用户名 + token」定位自定义音源：只填 token 不填用户名会退回公开用户并报「未找到支持 xx 平台的自定义源」。 只填账号密码时会自动登录换取 token。 ", -1)),
+      _cache[40] || (_cache[40] = _createElementVNode("div", { class: "cfg-section" }, "下载", -1)),
       _createElementVNode("div", _hoisted_13, [
         _createElementVNode("div", _hoisted_14, [
-          _cache[24] || (_cache[24] = _createElementVNode("span", { class: "cfg-label" }, "音源平台", -1)),
+          _cache[25] || (_cache[25] = _createElementVNode("span", { class: "cfg-label" }, "音源平台", -1)),
           _withDirectives(_createElementVNode("select", {
             "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.source) = $event)),
             class: "cfg-select"
@@ -230,7 +232,7 @@ return (_ctx, _cache) => {
           ])
         ]),
         _createElementVNode("div", _hoisted_16, [
-          _cache[25] || (_cache[25] = _createElementVNode("span", { class: "cfg-label" }, "下载音质", -1)),
+          _cache[26] || (_cache[26] = _createElementVNode("span", { class: "cfg-label" }, "下载音质", -1)),
           _withDirectives(_createElementVNode("select", {
             "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((config.quality) = $event)),
             class: "cfg-select"
@@ -246,7 +248,7 @@ return (_ctx, _cache) => {
           ])
         ]),
         _createElementVNode("div", _hoisted_18, [
-          _cache[26] || (_cache[26] = _createElementVNode("span", { class: "cfg-label" }, "搜索结果数", -1)),
+          _cache[27] || (_cache[27] = _createElementVNode("span", { class: "cfg-label" }, "搜索结果数", -1)),
           _withDirectives(_createElementVNode("input", {
             "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.max_results) = $event)),
             class: "cfg-input",
@@ -263,7 +265,7 @@ return (_ctx, _cache) => {
           ])
         ]),
         _createElementVNode("div", _hoisted_19, [
-          _cache[27] || (_cache[27] = _createElementVNode("span", { class: "cfg-label" }, "歌单下载并发", -1)),
+          _cache[28] || (_cache[28] = _createElementVNode("span", { class: "cfg-label" }, "歌单下载并发", -1)),
           _withDirectives(_createElementVNode("input", {
             "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.playlist_concurrency) = $event)),
             class: "cfg-input",
@@ -280,10 +282,10 @@ return (_ctx, _cache) => {
           ])
         ])
       ]),
-      _cache[39] || (_cache[39] = _createElementVNode("p", { class: "cfg-tip" }, "音质不可用时按 flac24bit > hires > flac > 320k > 192k > 128k 自动降级；真实容器以响应文件头为准。", -1)),
-      _cache[40] || (_cache[40] = _createElementVNode("p", { class: "cfg-tip" }, "歌单下载并发建议保持 3（与服务端队列默认一致）；过高容易触发上游音源限流。", -1)),
+      _cache[41] || (_cache[41] = _createElementVNode("p", { class: "cfg-tip" }, "音质不可用时按 flac24bit > hires > flac > 320k > 192k > 128k 自动降级；真实容器以响应文件头为准。", -1)),
+      _cache[42] || (_cache[42] = _createElementVNode("p", { class: "cfg-tip" }, "歌单下载并发建议保持 3（与服务端队列默认一致）；过高容易触发上游音源限流。", -1)),
       _createElementVNode("div", _hoisted_20, [
-        _cache[28] || (_cache[28] = _createElementVNode("span", { class: "cfg-label" }, "下载位置", -1)),
+        _cache[29] || (_cache[29] = _createElementVNode("span", { class: "cfg-label" }, "下载位置", -1)),
         _withDirectives(_createElementVNode("input", {
           "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.download_path) = $event)),
           class: "cfg-input",
@@ -293,7 +295,7 @@ return (_ctx, _cache) => {
         ])
       ]),
       _createElementVNode("div", _hoisted_21, [
-        _cache[29] || (_cache[29] = _createElementVNode("span", { class: "cfg-label" }, "文件名模板", -1)),
+        _cache[30] || (_cache[30] = _createElementVNode("span", { class: "cfg-label" }, "文件名模板", -1)),
         _withDirectives(_createElementVNode("input", {
           "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.name_template) = $event)),
           class: "cfg-input",
@@ -310,7 +312,7 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.subdir_by_artist]
           ]),
-          _cache[30] || (_cache[30] = _createElementVNode("span", null, [
+          _cache[31] || (_cache[31] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "按歌手分目录"),
             _createElementVNode("em", null, "在下载目录下按歌手建子目录")
           ], -1))
@@ -322,7 +324,7 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.save_cover]
           ]),
-          _cache[31] || (_cache[31] = _createElementVNode("span", null, [
+          _cache[32] || (_cache[32] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "保存封面"),
             _createElementVNode("em", null, "额外保存同名封面图")
           ], -1))
@@ -334,7 +336,7 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.embed_tag]
           ]),
-          _cache[32] || (_cache[32] = _createElementVNode("span", null, [
+          _cache[33] || (_cache[33] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "注入 ID3 标签"),
             _createElementVNode("em", null, "由服务端写入标题/艺术家/专辑/封面，不改变音频本体")
           ], -1))
@@ -346,7 +348,7 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.embed_lyric]
           ]),
-          _cache[33] || (_cache[33] = _createElementVNode("span", null, [
+          _cache[34] || (_cache[34] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "嵌入歌词"),
             _createElementVNode("em", null, "写入 USLT 帧，需同时开启 ID3 标签；失败自动降级")
           ], -1))
@@ -358,19 +360,31 @@ return (_ctx, _cache) => {
           }, null, 512), [
             [_vModelCheckbox, config.use_server_cache]
           ]),
-          _cache[34] || (_cache[34] = _createElementVNode("span", null, [
+          _cache[35] || (_cache[35] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "下到服务端缓存"),
             _createElementVNode("em", null, "不落本地，改为提交服务端缓存任务")
+          ], -1))
+        ]),
+        _createElementVNode("label", _hoisted_28, [
+          _withDirectives(_createElementVNode("input", {
+            "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.split_artists) = $event)),
+            type: "checkbox"
+          }, null, 512), [
+            [_vModelCheckbox, config.split_artists]
+          ]),
+          _cache[36] || (_cache[36] = _createElementVNode("span", null, [
+            _createElementVNode("b", null, "拆分多歌手标签"),
+            _createElementVNode("em", null, "「许嵩、何曼婷」写成多值，否则 MoviePilot 识别不到、整理会被拒")
           ], -1))
         ])
       ])
     ]),
-    _createElementVNode("div", _hoisted_28, [
+    _createElementVNode("div", _hoisted_29, [
       _createElementVNode("button", {
         class: "cfg-btn ghost",
         disabled: testing.value,
         onClick: testConnection
-      }, _toDisplayString(testing.value ? '测试中…' : '测试连接'), 9, _hoisted_29),
+      }, _toDisplayString(testing.value ? '测试中…' : '测试连接'), 9, _hoisted_30),
       _createElementVNode("div", { class: "cfg-foot-right" }, [
         _createElementVNode("button", {
           class: "cfg-btn ghost",
@@ -387,6 +401,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ConfigPanel = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b8c9000e"]]);
+const ConfigPanel = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e2065325"]]);
 
 export { ConfigPanel as default };

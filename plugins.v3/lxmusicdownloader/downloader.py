@@ -15,6 +15,31 @@ from .lxserver import QUALITY_EXT
 # Windows / Linux 都不允许出现在文件名里的字符
 INVALID_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
+# 多歌手分隔符。洛雪各音源普遍用「、」拼接，少数用逗号或分号。
+# 故意不含 "/" 与 "&"：AC/DC、Simon & Garfunkel 这类乐队名会被误拆。
+ARTIST_SEPARATORS = re.compile(r"[、,，;；]")
+
+
+def split_artists(value: object) -> list[str]:
+    """把歌手字段拆成独立艺术家，已是多值时原样去重返回。
+
+    服务端（music-tag-native）只把 ``singer`` 当成一个字符串写进 artist 标签
+    （``tagger.artist = metadata.singer``），而 MoviePilot 解析单值时也不做切分
+    （``_music_string_list()`` 原样返回），于是「许嵩、何曼婷」会被当成一个整体
+    艺术家，与 MusicBrainz 返回的 ['许嵩', '何曼婷'] 求不到交集，候选全部判为
+    不匹配，最终拿不到 media_source/media_id，整理被拒。
+    """
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        items = ARTIST_SEPARATORS.split(str(value or ""))
+    artists: list[str] = []
+    for item in items:
+        name = item.strip()
+        if name and name not in artists:
+            artists.append(name)
+    return artists
+
 
 def sniff_suffix(head: bytes) -> Optional[str]:
     """按文件头嗅探真实容器格式。
@@ -66,11 +91,13 @@ class LxDownloader:
         dest_dir: Path,
         base_name: str,
         quality: str,
+        artists: Optional[list[str]] = None,
     ) -> tuple[Path, int]:
         """把已打开的流式响应写盘，返回 (最终路径, 字节数)。
 
         先读第一个分块用于嗅探格式再决定扩展名，避免写完再改后缀导致返回一个
-        实际并不存在的路径。
+        实际并不存在的路径。``artists`` 给出 2 个及以上歌手时会在落盘后把
+        artist 标签改写成多值。
         """
         base_name = self.sanitize(base_name)
         dest_dir = Path(dest_dir)
@@ -95,12 +122,46 @@ class LxDownloader:
                 for chunk in iterator:
                     file.write(chunk)
                     written += len(chunk)
+            # 必须在 rename 之前补标签：改名后文件立刻对外可见，目录监控可能
+            # 马上触发整理，放之后再写就会和监控抢时间。mutagen 按内容识别
+            # 容器格式，所以 .part 这种无扩展名的临时文件也能正常写入。
+            if artists:
+                self.apply_artists(tmp, artists)
             tmp.replace(final)
         finally:
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
 
         return final, written
+
+    @staticmethod
+    def apply_artists(path: Path, artists: list[str]) -> bool:
+        """把 artist 标签改写成多值，让 MoviePilot 能按多艺术家匹配。
+
+        只对 2 个及以上歌手动手：单歌手时服务端写入的就是正确值，没必要多开
+        一次文件。任何异常都只记 debug 并返回 False，绝不影响下载结果。
+        """
+        if len(artists) < 2:
+            return False
+        try:
+            from mutagen import File as MutagenFile
+        except ImportError:  # 运行环境没有 mutagen（理论上 MoviePilot 自带）
+            logger.debug("运行环境缺少 mutagen，跳过多歌手标签拆分")
+            return False
+        try:
+            audio = MutagenFile(str(path), easy=True)
+            if audio is None:
+                logger.debug(f"无法识别音频容器，跳过标签拆分：{path}")
+                return False
+            if audio.tags is None:
+                audio.add_tags()
+            audio["artist"] = list(artists)
+            audio.save()
+            logger.info(f"已把 artist 标签拆成多值：{Path(path).name} -> {' / '.join(artists)}")
+            return True
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"写入多歌手标签失败：{path} - {err}")
+            return False
 
     def save_cover(self, response, song_path: Path) -> Optional[Path]:
         """把封面写到音频同名的图片文件。"""

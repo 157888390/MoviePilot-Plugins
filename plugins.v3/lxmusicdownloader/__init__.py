@@ -25,7 +25,7 @@ from app.schemas.types import EventType, NotificationType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 
-from .downloader import LxDownloader
+from .downloader import LxDownloader, split_artists
 from .lxserver import SUPPORTED_SOURCES, LxServerClient, LxServerError
 
 # 单次搜索缓存的结果数，供远程命令按序号下载
@@ -59,7 +59,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.1.3"
+    plugin_version = "3.2.0"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -96,6 +96,7 @@ class LxMusicDownloader(_PluginBase):
         self._use_server_cache = bool(config.get("use_server_cache"))
         self._embed_tag = bool(config.get("embed_tag"))
         self._embed_lyric = bool(config.get("embed_lyric"))
+        self._split_artists = bool(config.get("split_artists", True))
         self._sidebar_enabled = bool(config.get("sidebar_enabled", True))
         try:
             self._max_results = max(1, min(int(config.get("max_results") or MAX_CANDIDATES), 50))
@@ -377,6 +378,9 @@ class LxMusicDownloader(_PluginBase):
         client = self.get_client()
         base_name = LxDownloader.build_filename(song, self._name_template)
         target_dir = self._resolve_download_dir(song)
+        # 「许嵩、何曼婷」这种拼接串必须拆成多值写进标签，否则 MoviePilot 会当成
+        # 一个整体艺术家，与 MusicBrainz 的候选求不到交集，识别失败导致整理被拒。
+        artists = split_artists(song.get("singer")) if self._split_artists else []
 
         with client.open_download(
             play_url, base_name, song, embed_tag=self._embed_tag, embed_lyric=self._embed_lyric
@@ -385,7 +389,7 @@ class LxMusicDownloader(_PluginBase):
             if response.status_code >= 400:
                 detail = self._read_error_body(response)
                 raise LxServerError(f"代理下载失败：HTTP {response.status_code} {detail}")
-            saved, size = self._downloader.save_stream(response, target_dir, base_name, quality)
+            saved, size = self._downloader.save_stream(response, target_dir, base_name, quality, artists)
 
         if size < 4096:
             saved.unlink(missing_ok=True)
@@ -936,6 +940,19 @@ class LxMusicDownloader(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "split_artists",
+                                            "label": "拆分多歌手标签",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                 ],
@@ -958,6 +975,7 @@ class LxMusicDownloader(_PluginBase):
             "embed_lyric": True,
             "use_server_cache": False,
             "sidebar_enabled": True,
+            "split_artists": True,
         }
 
     def get_page(self) -> Optional[List[dict]]:
