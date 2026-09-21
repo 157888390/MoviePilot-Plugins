@@ -38,6 +38,16 @@ QUALITY_PREFERENCE = ["flac24bit", "hires", "flac", "320k", "192k", "128k"]
 # 也会把消息渠道刷爆；确需全量请走「歌单浏览 → 勾选下载」。
 COMMAND_PLAYLIST_LIMIT = 50
 
+# 缺参数时回给用户的用法提示。键是 event_data 里的 action，值是**真实命令名**——
+# 注意 action 本身不带斜杠（如 "lx_search"），直接拼进文案会得到 "lx_search"
+# 这种既不能点也不能复制的残缺命令，必须写成 "/lx_search"。
+COMMAND_USAGE = {
+    "lx_search": "/lx_search 歌曲名",
+    "lx_download": "/lx_download 序号，或 /lx_download 歌手 - 歌名",
+    "lx_playlist": "/lx_playlist 歌单名 / 歌单链接；/lx_playlist dl 歌单名 下载前 50 首",
+    "lx_stats": "/lx_stats",
+}
+
 
 class LxMusicDownloader(_PluginBase):
     """LX 音源下载插件主类。"""
@@ -49,7 +59,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.1.0"
+    plugin_version = "3.1.1"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -183,7 +193,8 @@ class LxMusicDownloader(_PluginBase):
                 return
 
             if not args:
-                self._reply(event, "LX 音源下载", f"用法：{action} 歌曲名，或 /lx_download 序号")
+                usage = COMMAND_USAGE.get(action, "/lx_search 歌曲名")
+                self._reply(event, "LX 音源下载", f"用法：{usage}")
                 return
 
             if action == "lx_search":
