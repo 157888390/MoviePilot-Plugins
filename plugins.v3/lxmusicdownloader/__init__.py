@@ -59,7 +59,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.1.2"
+    plugin_version = "3.1.3"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -225,7 +225,10 @@ class LxMusicDownloader(_PluginBase):
             return f"「{self._source}」没有搜索到与「{keyword}」相关的歌曲。"
 
         self._last_results[self._result_key(event)] = songs
-        lines = [f"共 {len(songs)} 条结果，回复 /lx_download 序号 即可下载："]
+        # 提示必须写明「带命令前缀」：MP 的媒体交互链会吞掉裸数字
+        # （app/chain/interaction.py:278 isdigit 分支，无活动会话时回「输入有误！」
+        # 并消费消息，UserMessage 事件不触发），所以直接回复序号永远到不了插件。
+        lines = [f"共 {len(songs)} 条结果，回复 /lx_download 序号 下载对应歌曲（如 /lx_download 1，直接回复数字无效）："]
         for index, song in enumerate(songs, start=1):
             qualities = "/".join(item.get("type", "") for item in song.get("types") or [])
             lines.append(
