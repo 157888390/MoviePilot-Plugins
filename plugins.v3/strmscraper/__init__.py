@@ -1,3 +1,13 @@
+"""STRM 监控刮削插件（V3 专用）。
+
+监控目录中新增或移入的 ``.strm`` 文件，调用主程序 ``ScrapingChain`` **就地**补齐
+剧集级元数据（tvshow.nfo、poster/backdrop/logo/banner/thumb、Season1/season.nfo），
+不转移文件、也不自行维护刮削记录（记录完全由主程序管理）。
+
+与 V2 版的区别：V3 走 ``ScrapingChain.scrape_metadata``，V2 走
+``MediaChain.scrape_metadata`` + ``StorageChain.get_file_item(storage=\"local\")``。
+"""
+
 import os
 import re
 import threading
@@ -58,6 +68,7 @@ def scan_strm_files(root: Path, skip=None, limit: int = MAX_SCAN_FILES) -> List[
     found: List[Path] = []
 
     def _on_error(err: OSError):
+        """os.walk 的错误回调：跳过无权限或已失效的目录，不让整次扫描中断。"""
         logger.warn(f"STRM扫描跳过不可读目录：{err}")
 
     for current, dirs, files in os.walk(str(root), onerror=_on_error, followlinks=False):
@@ -80,32 +91,42 @@ class _StrmHandler(FileSystemEventHandler):
     """
 
     def __init__(self, monpath: str, plugin: Any, **kwargs):
+        """绑定被监控目录与插件实例。"""
         super().__init__(**kwargs)
         self._watch_path = monpath
         self._plugin = plugin
 
     def on_created(self, event):
+        """新建文件时触发，只处理文件、忽略目录。"""
         if not event.is_directory:
             self._plugin.event_handler(event_path=event.src_path, mon_path=self._watch_path)
 
     def on_moved(self, event):
-        # 覆盖“先写临时文件再改名”的落盘方式
+        """移入文件时触发，覆盖「先写临时文件再改名」的落盘方式。"""
         if not getattr(event, "is_directory", False):
             self._plugin.event_handler(event_path=event.dest_path, mon_path=self._watch_path)
 
 
 class StrmScraper(_PluginBase):
+    """STRM 监控刮削插件主类。
+
+    监控若干目录，捕获新增/移入的 ``.strm`` 文件后向上定位剧集根目录并就地刮削；
+    同时提供全量扫描、定时刷新与侧栏海报墙（Vue 联邦）。
+    """
+
     # 插件名称
     plugin_name = "STRM监控刮削"
     # 插件描述
     plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），记录完全由主程序管理。V3 专用插件。"
+    # 插件标签（与 package.v3.json 的 labels 保持一致）
+    plugin_label = "刮削,STRM,监控"
     # 插件图标（自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图）
     plugin_icon = (
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "3.1.0"
+    plugin_version = "3.1.1"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -136,6 +157,7 @@ class StrmScraper(_PluginBase):
     _poster_cache: Dict[str, str] = {}   # TMDB 海报地址缓存：key -> url
 
     def init_plugin(self, config: dict = None):
+        """读取配置、清理历史遗留数据并按需重启目录监控，允许重复调用。"""
         self._scraped = {}
         self._list_cache = {"time": 0.0, "items": []}
         # 历史版本遗留的刮削历史数据已不再使用（海报墙改由 Vue 侧栏页实现），直接清理
@@ -196,6 +218,11 @@ class StrmScraper(_PluginBase):
             self.__save_config()
 
     def __save_config(self):
+        """把当前运行状态回写为插件配置。
+
+        ``onlyonce`` 恒写 False：一次性任务执行完必须落盘关闭，否则重启后
+        会被当成仍待执行而重复全量扫描。
+        """
         self.update_config({
             "enabled": self._enabled,
             "mode": self._mode,
@@ -210,6 +237,7 @@ class StrmScraper(_PluginBase):
         })
 
     def get_state(self) -> bool:
+        """返回插件当前是否启用。"""
         return self._enabled
 
     # ------------------------------------------------------------------
@@ -250,6 +278,7 @@ class StrmScraper(_PluginBase):
         避免把 storage 写死为 "local" 而在纯云盘挂载场景下失效。
         """
         def _try(stype: str):
+            """按存储类型取文件项，取不到返回 None 而不是抛出。"""
             try:
                 return StorageChain().get_file_item(storage=stype, path=Path(path))
             except Exception:
@@ -274,6 +303,11 @@ class StrmScraper(_PluginBase):
         return None
 
     def __scrape(self, target_dir: Path):
+        """对已定位好的剧集根目录执行一次刮削。
+
+        ``target_dir`` 必须是**调用方**向上定位好的剧集根（电影为其所在目录），
+        本方法不会也不应再做一次向上定位。
+        """
         # target_dir 已是定位好的剧集根目录（电影为其所在目录）。
         # 注意：调用方（event_handler / full_scan）已负责向上定位剧集根，
         # 此处不要再对 target_dir 调用 __series_root，否则会把目录当成文件
@@ -424,6 +458,7 @@ class StrmScraper(_PluginBase):
             groups: Dict[Path, List[Path]] = {}
 
             def _skip(full: str) -> bool:
+                """按用户配置的关键字（每行一个，按正则匹配）排除路径。"""
                 if not self._exclude_keywords:
                     return False
                 return any(kw and re.findall(kw, full) for kw in self._exclude_keywords.split("\n"))
@@ -735,6 +770,11 @@ class StrmScraper(_PluginBase):
     # 远程触发 / API
     # ------------------------------------------------------------------
     def get_api(self) -> List[Dict[str, Any]]:
+        """返回插件 API 列表。
+
+        供 Vue 侧栏页调用的接口统一声明 ``auth: "bear"``；``/strm_scan`` 与
+        ``/strm_rescrape`` 保持默认 apikey 认证，供外部脚本或旧调用方使用。
+        """
         return [
             {
                 "path": "/strm_scan",
@@ -909,6 +949,7 @@ class StrmScraper(_PluginBase):
         raise HTTPException(status_code=404, detail="poster not found")
 
     def api_scan(self, force: bool = False) -> schemas.Response:
+        """后台启动一次全量扫描刮削，立即返回以免阻塞请求。"""
         threading.Thread(target=self.full_scan, kwargs={"force": force}, daemon=True).start()
         return schemas.Response(success=True, message="全量扫描已在后台启动")
 
@@ -1065,6 +1106,11 @@ class StrmScraper(_PluginBase):
         }]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """返回插件配置表单与默认配置。
+
+        Vue 模式下表单由远程 ``Config`` 组件渲染，这里的 schema 只作为非 Vue
+        渲染时的兜底，默认值则始终用于初始化。
+        """
         return [
             {
                 "component": "VForm",

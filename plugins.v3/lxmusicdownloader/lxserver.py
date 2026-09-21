@@ -94,6 +94,7 @@ class LxServerClient:
         timeout: float = 30.0,
         download_timeout: float = 300.0,
     ) -> None:
+        """保存服务端地址与凭据；下载超时单独设置，避免大文件被普通超时掐断。"""
         self.host = (host or "").strip().rstrip("/")
         self.username = (username or "").strip()
         self.password = password or ""
@@ -143,9 +144,11 @@ class LxServerClient:
         return headers
 
     def _get(self, path: str, params: Optional[dict] = None, extra_headers: Optional[dict] = None) -> Any:
+        """发送带鉴权头的 GET 请求。"""
         return self._request("GET", path, params=params, extra_headers=extra_headers)
 
     def _post(self, path: str, body: Optional[dict] = None, extra_headers: Optional[dict] = None) -> Any:
+        """发送带鉴权头的 POST 请求，body 以 JSON 发送。"""
         return self._request("POST", path, json_body=body, extra_headers=extra_headers)
 
     def _request(

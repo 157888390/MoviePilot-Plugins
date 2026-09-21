@@ -54,12 +54,14 @@ class LxMusicDownloader(_PluginBase):
 
     plugin_name = "LX 音源下载"
     plugin_desc = "调用自建 LX Sync Server，搜索歌曲、浏览歌单并下载到自定义目录。"
+    # 插件标签（与 package.v3.json 的 labels 保持一致）
+    plugin_label = "音乐,下载,歌单,LX音源"
     # 自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图
     plugin_icon = (
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.2.0"
+    plugin_version = "3.2.1"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -574,6 +576,7 @@ class LxMusicDownloader(_PluginBase):
         next_index = 0
 
         def consume() -> None:
+            """工作线程主体：从游标里抢下一个序号并下载，取完即退出。"""
             nonlocal next_index
             while True:
                 with cursor:

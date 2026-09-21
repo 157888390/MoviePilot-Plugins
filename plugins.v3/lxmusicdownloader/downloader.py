@@ -83,6 +83,7 @@ class LxDownloader:
     """把服务端返回的二进制流写到目标目录。"""
 
     def __init__(self, chunk_size: int = 64 * 1024) -> None:
+        """记录流式写盘的分块大小（默认 64KB）。"""
         self._chunk_size = chunk_size
 
     def save_stream(

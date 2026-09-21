@@ -1,3 +1,13 @@
+"""STRM 监控刮削插件（V2 专用）。
+
+监控目录中新增或移入的 ``.strm`` 文件，向上定位剧集根目录后调用主程序
+``MediaChain.scrape_metadata`` 就地补齐剧集级元数据（tvshow.nfo、海报等），
+不转移文件、也不自行维护刮削记录。
+
+与 V3 版的区别：V2 用 ``MediaChain.scrape_metadata`` + ``StorageChain.get_file_item(storage="local")``
+取文件项；V3 版请改用 ``plugins.v3/strmscraper``（走 ``ScrapingChain``）。
+"""
+
 import re
 import threading
 import time
@@ -30,32 +40,42 @@ class _StrmHandler(FileSystemEventHandler):
     """
 
     def __init__(self, monpath: str, plugin: Any, **kwargs):
+        """绑定被监控目录与插件实例。"""
         super().__init__(**kwargs)
         self._watch_path = monpath
         self._plugin = plugin
 
     def on_created(self, event):
+        """新建文件时触发，只处理文件、忽略目录。"""
         if not event.is_directory:
             self._plugin.event_handler(event_path=event.src_path, mon_path=self._watch_path)
 
     def on_moved(self, event):
-        # 覆盖“先写临时文件再改名”的落盘方式
+        """移入文件时触发，覆盖「先写临时文件再改名」的落盘方式。"""
         if not getattr(event, "is_directory", False):
             self._plugin.event_handler(event_path=event.dest_path, mon_path=self._watch_path)
 
 
 class StrmScraper(_PluginBase):
+    """STRM 监控刮削插件主类（V2）。
+
+    监控若干目录，捕获新增/移入的 ``.strm`` 文件后向上定位剧集根目录并就地刮削，
+    另提供全量扫描接口与可选的定时全量刷新。
+    """
+
     # 插件名称
     plugin_name = "STRM监控刮削"
     # 插件描述
     plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链补齐剧集级元数据（tvshow.nfo/海报等），记录完全由主程序管理。"
+    # 插件标签（与 package.v2.json 的 labels 保持一致）
+    plugin_label = "刮削,STRM,监控"
     # 插件图标（自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图）
     plugin_icon = (
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/strmscraper.png"
     )
     # 插件版本
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -82,6 +102,7 @@ class StrmScraper(_PluginBase):
     _cron_expression = ""            # 标准 5 段 cron：分 时 日 月 周（如 "0 4 * * *"）
 
     def init_plugin(self, config: dict = None):
+        """读取配置并按配置重启目录监控，允许重复调用。"""
         self.mediaChain = MediaChain()
         self.storagechain = StorageChain()
         self._scraped = {}
@@ -133,6 +154,11 @@ class StrmScraper(_PluginBase):
             self.__save_config()
 
     def __save_config(self):
+        """把当前运行状态回写为插件配置。
+
+        ``onlyonce`` 恒写 False：一次性任务执行完必须落盘关闭，否则重启后
+        会被当成仍待执行而重复全量扫描。
+        """
         self.update_config({
             "enabled": self._enabled,
             "mode": self._mode,
@@ -145,6 +171,7 @@ class StrmScraper(_PluginBase):
         })
 
     def get_state(self) -> bool:
+        """返回插件当前是否启用。"""
         return self._enabled
 
     # ------------------------------------------------------------------
@@ -178,6 +205,11 @@ class StrmScraper(_PluginBase):
     # 刮削实现：全部交给主程序 MediaChain，本插件不落任何元数据
     # ------------------------------------------------------------------
     def __scrape(self, target_dir: Path):
+        """对已定位好的剧集根目录执行一次刮削。
+
+        ``target_dir`` 必须是**调用方**向上定位好的剧集根（电影为其所在目录），
+        本方法不会也不应再做一次向上定位。
+        """
         # target_dir 已是定位好的剧集根目录（电影为其所在目录）。
         # 注意：调用方（event_handler / full_scan）已负责向上定位剧集根，
         # 此处不要再对 target_dir 调用 __series_root，否则会把目录当成文件
@@ -286,6 +318,11 @@ class StrmScraper(_PluginBase):
     # 远程触发 / API
     # ------------------------------------------------------------------
     def get_api(self) -> List[Dict[str, Any]]:
+        """返回插件 API 列表。
+
+        本插件没有 Vue 前端，接口供外部/脚本调用，因此不声明 ``auth``，
+        沿用默认的 apikey 认证。
+        """
         return [{
             "path": "/strm_scan",
             "endpoint": self.api_scan,
@@ -295,6 +332,7 @@ class StrmScraper(_PluginBase):
         }]
 
     def api_scan(self) -> schemas.Response:
+        """后台启动一次全量扫描刮削，立即返回以免阻塞请求。"""
         threading.Thread(target=self.full_scan, daemon=True).start()
         return schemas.Response(success=True)
 
@@ -302,6 +340,7 @@ class StrmScraper(_PluginBase):
     # 界面
     # ------------------------------------------------------------------
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """返回 Vuetify JSON 配置表单与默认配置（本插件为 JSON 配置模式）。"""
         return [
             {
                 "component": "VForm",
@@ -486,6 +525,7 @@ class StrmScraper(_PluginBase):
         }
 
     def get_page(self) -> Optional[List[dict]]:
+        """返回详情页内容；本插件没有详情页，返回 None 表示不渲染。"""
         return None
 
     def stop_service(self):
