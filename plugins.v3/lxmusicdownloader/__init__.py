@@ -59,7 +59,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.1.1"
+    plugin_version = "3.1.2"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -181,7 +181,17 @@ class LxMusicDownloader(_PluginBase):
             self._reply(event, "LX 音源下载", "插件未启用，请先在插件配置中开启。")
             return
 
-        args = str(event_data.get("args") or event_data.get("arg") or "").strip()
+        # MP v3 的 app/command.py __run_command() 把命令参数放进 **arg_str**：
+        #     if data_str: data["arg_str"] = data_str
+        # 事件载荷 PluginActionEventData 本身并没有 args/arg 字段。只读 args/arg
+        # 会恒为空，表现为「带参数也一直回用法提示」，所以必须以 arg_str 为准，
+        # 其余键只作向后兼容。
+        args = str(
+            event_data.get("arg_str")
+            or event_data.get("args")
+            or event_data.get("arg")
+            or ""
+        ).strip()
 
         try:
             if action == "lx_stats":
@@ -414,21 +424,41 @@ class LxMusicDownloader(_PluginBase):
         return "服务端缓存统计：\n" + str(data)[:800]
 
     def _reply(self, event: Event, title: str, text: str) -> None:
-        """把结果回复到命令来源渠道，没有渠道时降级为系统通知。"""
+        """把结果回复到命令来源渠道，没有渠道时降级为系统通知。
+
+        ⚠️ 必须带上发起用户。MP v3 的 `app/chain/_messaging.py` 里：
+
+            if message.userid:
+                return None          # 有用户 -> 直接投递给该用户
+            return get_notification_switch(message.mtype) or "admin"
+
+        userid 为空时会退化成「发送给管理员」的广播路由走另一条通道，这条路
+        径出问题就会静默收不到回复。命令事件的载荷里用户字段叫 **user**
+        （`app/command.py`：`data["user"] = userid`），不是 userid。
+        """
         event_data = event.event_data or {}
         self.post_message(
             channel=event_data.get("channel"),
             mtype=NotificationType.Plugin,
             title=title,
             text=text,
-            userid=event_data.get("userid"),
+            userid=self._command_user(event),
         )
+
+    @staticmethod
+    def _command_user(event: Event) -> Any:
+        """取出命令发起用户，兼容不同版本的载荷字段名。"""
+        event_data = event.event_data or {}
+        return event_data.get("user") or event_data.get("userid")
 
     @staticmethod
     def _result_key(event: Event) -> str:
         """按来源会话隔离搜索结果缓存。"""
         event_data = event.event_data or {}
-        return f"{event_data.get('channel') or 'system'}:{event_data.get('userid') or 'anonymous'}"
+        # 同样是 user 而不是 userid：取不到会让所有用户共用同一个「anonymous」
+        # 键，A 搜索出的候选会被 B 的 /lx_download 序号 命中。
+        user = event_data.get("user") or event_data.get("userid") or "anonymous"
+        return f"{event_data.get('channel') or 'system'}:{user}"
 
     # ------------------------------------------------------------------ #
     #                            客户端与路径                              #
