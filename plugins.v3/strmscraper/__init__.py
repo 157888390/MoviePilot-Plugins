@@ -2,20 +2,28 @@
 
 监控目录中新增或移入的 ``.strm`` 文件，调用主程序 ``ScrapingChain`` **就地**补齐
 剧集级元数据（tvshow.nfo、poster/backdrop/logo/banner/thumb、Season1/season.nfo），
-不转移文件、也不自行维护刮削记录（记录完全由主程序管理）。
+不转移文件；刮削结果由主程序管理，本插件另按需把**刮削记录**落到自己的数据目录，
+便于界面上回溯。
+
+目录结构识别 ``<监控目录>/<分类名>/<剧名>/Season N/`` 与
+``<监控目录>/<剧名>/Season N/`` 两种形态：前者的一级子目录即主程序
+``category.yaml`` 生成的分类目录（国漫/日番/国产剧/欧美剧/日韩剧/纪录片/儿童/综艺/未分类），
+界面据此分组，全量刷新也可只对某个分类执行。
 
 与 V2 版的区别：V3 走 ``ScrapingChain.scrape_metadata``，V2 走
 ``MediaChain.scrape_metadata`` + ``StorageChain.get_file_item(storage=\"local\")``。
 """
 
+import json
 import os
 import re
 import threading
 import time
 import traceback
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import Body, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
@@ -27,6 +35,7 @@ from app import schemas
 from app.chain.scraping import ScrapingChain
 from app.chain.storage import StorageChain
 from app.plugins import _PluginBase
+from app.runtime.thread import ThreadHelper
 from app.sdk.logging import logger
 
 # 全局锁，避免并发刮削同一目录
@@ -55,6 +64,14 @@ POSTER_NAMES = (
 )
 # 允许作为海报读取的图片后缀
 POSTER_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+# 刮削记录文件名（落在插件数据目录下）
+RECORD_FILE = "scrape_records.json"
+# 刮削记录保留条数上限，避免长期运行后数据目录无限膨胀
+RECORD_LIMIT = 500
+# 主程序 category.yaml 的默认电视剧分类名（仅用于界面提示排序，识别仍以实际目录名为准）
+DEFAULT_TV_CATEGORIES = (
+    "国漫", "日番", "纪录片", "儿童", "综艺", "国产剧", "欧美剧", "日韩剧", "未分类",
+)
 
 
 def scan_strm_files(root: Path, skip=None, limit: int = MAX_SCAN_FILES) -> List[Path]:
@@ -85,6 +102,63 @@ def scan_strm_files(root: Path, skip=None, limit: int = MAX_SCAN_FILES) -> List[
     return found
 
 
+def list_category_dirs(root: Path) -> List[str]:
+    """
+    返回监控目录下可作为「分类分组」的一级子目录名（已排序）。
+
+    判据（两步，缺一不可）：
+    1) 该一级子目录的直接子项里有**不是季目录**的目录 —— 即它的孩子是「剧名」；
+    2) 该一级子目录里没有直接躺着 .strm 文件 —— 分类目录只装剧名，自己不装剧集。
+
+    这样 ``<库根>/国产剧/<剧名>/Season 1/`` 会命中（孩子是剧名），而
+    ``<库根>/<剧名>/Season 1/`` 不会（孩子是季目录），电影目录也不会。
+
+    自动识别而非读取 ``category.yaml``：分类名就是目录名，实时反映磁盘现状，
+    也兼容用户自建的分类目录与中文以外的命名。
+    """
+    names: List[str] = []
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name)
+    except OSError as err:
+        logger.warn(f"读取监控目录失败：{root}：{err}")
+        return names
+    for entry in entries:
+        try:
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if any(child.is_file() and child.suffix.lower() == ".strm" for child in entry.iterdir()):
+                # 自己直接装 .strm → 是剧集目录/电影目录，不是分类层
+                continue
+            # 直接子项里存在「非季目录」的目录 → 这些是剧名，因此本层是分类层
+            has_show_dir = any(
+                child.is_dir() and not child.name.startswith(".") and not SEASON_RE.match(child.name)
+                for child in entry.iterdir()
+            )
+        except OSError:
+            continue
+        if has_show_dir:
+            names.append(entry.name)
+    return names
+
+
+def match_category(file_path: Path, root: Path, categories: Iterable[str]) -> str:
+    """
+    判断 ``file_path`` 相对监控目录 ``root`` 落在哪个分类目录内，不在分类内时返回空串。
+
+    :param file_path: 任意深度的 .strm 或其父目录
+    :param root: 该 .strm 所属的监控目录
+    :param categories: ``list_category_dirs`` 的识别结果
+    :return: 分类目录名；路径不落在任何分类内时返回空串
+    """
+    try:
+        rel = file_path.relative_to(root)
+    except ValueError:
+        return ""
+    head = rel.parts[0] if rel.parts else ""
+    return head if head in set(categories) else ""
+
+
+
 class _StrmHandler(FileSystemEventHandler):
     """
     watchdog 事件处理器：把新增/移入的 .strm 事件转给插件处理
@@ -111,13 +185,13 @@ class StrmScraper(_PluginBase):
     """STRM 监控刮削插件主类。
 
     监控若干目录，捕获新增/移入的 ``.strm`` 文件后向上定位剧集根目录并就地刮削；
-    同时提供全量扫描、定时刷新与侧栏海报墙（Vue 联邦）。
+    同时提供全量扫描（可只对某个分类目录执行）与侧栏海报墙（Vue 联邦）。
     """
 
     # 插件名称
     plugin_name = "STRM监控刮削"
     # 插件描述
-    plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），记录完全由主程序管理。V3 专用插件。"
+    plugin_desc = "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），界面按分类目录分组，支持按分类刷新，刮削记录落插件数据目录。V3 专用插件。"
     # 插件标签（与 package.v3.json 的 labels 保持一致）
     plugin_label = "刮削,STRM,监控"
     # 插件图标（自定义图标必须写成完整 URL：裸文件名只会去官方库 icons/ 里找，找不到就回退成拼图占位图）
@@ -126,7 +200,7 @@ class StrmScraper(_PluginBase):
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：从 1.x 跃迁到下一个主版本并归零）
-    plugin_version = "3.1.1"
+    plugin_version = "3.2.0"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -145,16 +219,15 @@ class StrmScraper(_PluginBase):
     _monitor_dirs = ""
     _exclude_keywords = ""
     _overwrite = False             # 是否覆盖已有刮削产物
-    _skip_scraped = True           # 全量扫描时跳过已刮削（nfo 齐全）的目录
     _onlyonce = False
     _scraped: Dict[str, float] = {}   # 已刮削目录 + 时间戳，做轻量去重
-    _cron_enabled = False            # 启用定时全量刷新
-    _cron_expression = ""            # 标准 5 段 cron：分 时 日 月 周（如 "0 4 * * *"）
     _sidebar_enabled = True          # 是否在主界面左侧导航栏显示「STRM刮削」入口
+    _record_enabled = True           # 是否把刮削记录落盘到插件数据目录
     _task_lock = threading.Lock()    # 任务状态读写锁
     _tasks: Dict[str, Dict[str, Any]] = {}   # 刮削任务：task_id -> 任务详情
     _list_cache: Dict[str, Any] = {"time": 0.0, "items": []}   # 媒体清单缓存
     _poster_cache: Dict[str, str] = {}   # TMDB 海报地址缓存：key -> url
+    _running = False                 # 是否有全量扫描正在执行（避免重复触发互相抢占）
 
     def init_plugin(self, config: dict = None):
         """读取配置、清理历史遗留数据并按需重启目录监控，允许重复调用。"""
@@ -173,13 +246,11 @@ class StrmScraper(_PluginBase):
             self._monitor_dirs = config.get("monitor_dirs") or ""
             self._exclude_keywords = config.get("exclude_keywords") or ""
             self._overwrite = config.get("overwrite") or False
-            # 缺省为 True：老配置没有这个键时要保持跳过行为
-            self._skip_scraped = config.get("skip_scraped", True)
             self._onlyonce = config.get("onlyonce") or False
-            self._cron_enabled = config.get("cron_enabled") or False
-            self._cron_expression = (config.get("cron_expression") or "").strip()
             # 缺省为 True：老配置没有这个键时保持显示侧栏入口
             self._sidebar_enabled = config.get("sidebar_enabled", True)
+            # 缺省为 True：老配置没有这个键时保持记录开启
+            self._record_enabled = config.get("record_enabled", True)
 
         # 先停止现有监控
         self.stop_service()
@@ -229,11 +300,9 @@ class StrmScraper(_PluginBase):
             "monitor_dirs": self._monitor_dirs,
             "exclude_keywords": self._exclude_keywords,
             "overwrite": self._overwrite,
-            "skip_scraped": self._skip_scraped,
             "onlyonce": False,
-            "cron_enabled": self._cron_enabled,
-            "cron_expression": self._cron_expression,
             "sidebar_enabled": self._sidebar_enabled,
+            "record_enabled": self._record_enabled,
         })
 
     def get_state(self) -> bool:
@@ -241,11 +310,15 @@ class StrmScraper(_PluginBase):
         return self._enabled
 
     # ------------------------------------------------------------------
-    # 事件处理：watchdog 直接同步调用，简单直接（借鉴目录实时监控插件）
+    # 事件处理：watchdog 回调里只做轻量判断，真正的刮削丢给共享线程池
     # ------------------------------------------------------------------
     def event_handler(self, event_path: str, mon_path: str):
         """
-        处理文件变化：过滤 .strm 后，就地刮削（不转移，刮在 .strm 所在目录）
+        处理文件变化：过滤 .strm 后，就地刮削（不转移，刮在 .strm 所在目录）。
+
+        判断留在 watchdog 线程里（成本极低），刮削本身提交到主程序共享线程池：
+        刮削是重 I/O（主程序要下 8~10 张图 + 写 NFO），直接同步执行会把 watchdog
+        的事件分发线程堵死，一季多集连续落盘时后续事件全部积压甚至丢失。
         """
         try:
             if not event_path.lower().endswith(".strm"):
@@ -263,7 +336,8 @@ class StrmScraper(_PluginBase):
             if any(p in event_path for p in ["/@Recycle/", "/#recycle/", "/@eaDir", "/."]):
                 logger.debug(f"{event_path} 是回收站或隐藏文件，跳过")
                 return
-            self.__scrape(self.__series_root(file_path))
+            target = self.__series_root(file_path)
+            ThreadHelper().submit(self.__scrape, target)
         except Exception as e:
             logger.error(f"STRM事件处理出错：{str(e)} - {traceback.format_exc()}")
 
@@ -345,9 +419,10 @@ class StrmScraper(_PluginBase):
                 logger.info(f"STRM刮削完成：{target_dir}")
             else:
                 logger.warn(f"STRM刮削未完全成功 {target_dir}：{msg}")
-            # 记录刮削历史（供详情页展示）
+            self.__write_record(str(target_dir), "dir", ok, msg)
         except Exception as e:
             logger.error(f"STRM刮削失败 {target_dir}：{str(e)} - {traceback.format_exc()}")
+            self.__write_record(str(target_dir), "dir", False, str(e))
 
     def __dedup(self, key: str) -> bool:
         """
@@ -407,9 +482,11 @@ class StrmScraper(_PluginBase):
                 overwrite=self._overwrite if overwrite is None else overwrite,
             )
             logger.info(f"STRM单文件刮削{'完成' if ok else '未完成'}：{strm_file}")
+            self.__write_record(str(strm_file), "file", ok, msg)
             return ok, msg
         except Exception as e:
             logger.error(f"STRM单文件刮削失败 {strm_file}：{str(e)} - {traceback.format_exc()}")
+            self.__write_record(str(strm_file), "file", False, str(e))
             return False, str(e)
 
     @staticmethod
@@ -434,6 +511,8 @@ class StrmScraper(_PluginBase):
 
         说明：宿主的「文件已存在，跳过」只对 backdrop 生效，其余 8~9 种图片每次都会重下，
         因此必须在插件侧提前整目录跳过，否则重扫成本接近首次刮削。
+        本判据仅供界面展示刮削状态（``dir_scraped`` / ``unscraped``），
+        全量扫描不再据此跳过目录。
         """
         if not all(StrmScraper.__nfo_exists(s) for s in strms):
             return False
@@ -442,16 +521,35 @@ class StrmScraper(_PluginBase):
             return (target / "tvshow.nfo").exists()
         return True
 
-    def full_scan(self, force: bool = False):
+    def full_scan(self, force: bool = False, scope: str = "all", paths: Optional[List[str]] = None):
         """
         全量扫描监控目录内所有 .strm，按剧集根目录去重后刮削。
 
-        :param force: True 时无视「跳过已刮削」开关，强制重刮（覆盖与否仍由 _overwrite 决定）
+        :param force: 保留参数（历史调用方仍在传），当前不影响行为——刮削是否覆盖已有
+            元数据统一由插件的「覆盖已有元数据」开关（``_overwrite``）决定
+        :param scope: 扫描范围。``all``=全部监控目录；``category``=只扫 ``paths`` 里
+            指定的分类目录（``<监控目录>/<分类名>``）
+        :param paths: ``scope=category`` 时要扫描的分类目录绝对路径列表
         """
+        roots: List[Path] = []
         for mon_path in [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]:
             root = Path(mon_path)
+            if scope == "category" and paths:
+                # 只保留属于该监控目录、且确实存在的分类目录，防止越界扫描
+                for raw in paths:
+                    candidate = Path(raw)
+                    try:
+                        candidate.relative_to(root)
+                    except ValueError:
+                        continue
+                    if candidate.is_dir():
+                        roots.append(candidate)
+            else:
+                roots.append(root)
+
+        for root in roots:
             if not root.exists():
-                logger.warn(f"监控目录不存在：{mon_path}")
+                logger.warn(f"监控目录不存在：{root}")
                 continue
             logger.info(f"STRM全量扫描：{root}{'（强制）' if force else ''}")
             # 先完整收集：剧集根目录 -> 该目录下全部 .strm（避免边遍历边写文件）
@@ -466,62 +564,78 @@ class StrmScraper(_PluginBase):
             for strm in scan_strm_files(root, skip=_skip):
                 groups.setdefault(self.__series_root(strm), []).append(strm)
 
-            skip = (not force) and self._skip_scraped
-            scraped_cnt = skipped_cnt = 0
+            scraped_cnt = failed_cnt = 0
             for target, strms in groups.items():
-                if skip and self.__already_scraped(target, strms):
-                    skipped_cnt += 1
-                    continue
                 try:
                     self.__scrape(target)
                     scraped_cnt += 1
                 except Exception as e:
+                    failed_cnt += 1
                     logger.error(f"STRM刮削失败 {target}：{str(e)}")
             logger.info(
-                f"STRM全量扫描结束：{root} 共 {len(groups)} 个目录，"
-                f"刮削 {scraped_cnt} 个，跳过 {skipped_cnt} 个已刮削"
+                f"STRM全量扫描结束：{root} 共 {len(groups)} 个目录，刮削 {scraped_cnt} 个"
+                + (f"，失败 {failed_cnt} 个" if failed_cnt else "")
             )
 
     # ------------------------------------------------------------------
-    # 定时全量刷新（cron）：通过重写 get_service() 向 MoviePilot 本体调度器
-    # 注册任务，由本体（APScheduler）按 cron 表达式周期性执行，不自行造轮子。
-    # 本体每次更新会先 remove 旧任务再 add，因此启用/禁用/改表达式都会自动生效。
+    # 刮削记录：落在插件自己的数据目录（get_data_path），不受主程序记录影响
     # ------------------------------------------------------------------
-    def get_service(self) -> List[Dict[str, Any]]:
-        """
-        向本体调度器注册定时任务。仅在启用且 cron 表达式合法时返回服务，
-        关闭或表达式非法时返回空列表（本体据此移除旧任务）。
-        """
-        if not self._cron_enabled or not self._cron_expression:
-            return []
-        try:
-            from apscheduler.triggers.cron import CronTrigger
-            trigger = CronTrigger.from_crontab(self._cron_expression)
-        except Exception as e:
-            logger.error(f"STRM定时刷新：cron 表达式无效 [{self._cron_expression}]：{e}")
-            return []
-        return [{
-            "id": "strm_cron_scan",
-            "name": "STRM定时全量刷新",
-            "trigger": trigger,
-            "func": self.scheduled_full_scan,
-            "kwargs": {
-                "max_instances": 1,
-                "misfire_grace_time": 3600,
-                "coalesce": True,
-            },
-        }]
+    def __record_path(self) -> Path:
+        """返回刮削记录文件的绝对路径（父目录不存在时创建）。"""
+        data_dir = Path(self.get_data_path())
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / RECORD_FILE
 
-    def scheduled_full_scan(self):
-        """cron 到点触发：对全部监控目录执行一次全量刷新刮削"""
-        if not self._cron_enabled:
+    def __load_records(self) -> List[Dict[str, Any]]:
+        """读取已落盘的刮削记录；文件缺失或损坏时返回空列表。"""
+        try:
+            raw = self.__record_path().read_text(encoding="utf-8")
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            logger.debug(f"读取刮削记录失败：{e}")
+            return []
+
+    def __write_record(self, target: str, target_type: str, success: bool, message: str = ""):
+        """
+        追加一条刮削记录并落盘。
+
+        记录只保留最近 ``RECORD_LIMIT`` 条，写入失败仅记 debug 日志，绝不阻断刮削主流程。
+        """
+        if not self._record_enabled:
             return
         try:
-            logger.info("STRM定时刷新触发：开始全量扫描")
-            self.full_scan()
-            logger.info("STRM定时刷新完成")
+            records = self.__load_records()
+            records.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "type": target_type,
+                "target": target,
+                "title": Path(target).name,
+                "category": self.__category_of(Path(target)),
+                "success": bool(success),
+                "message": message or "",
+            })
+            if len(records) > RECORD_LIMIT:
+                records = records[-RECORD_LIMIT:]
+            self.__record_path().write_text(
+                json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
         except Exception as e:
-            logger.error(f"STRM定时刷新失败：{str(e)} - {traceback.format_exc()}")
+            logger.debug(f"写入刮削记录失败（非阻断）：{e}")
+
+    def __category_of(self, target: Path) -> str:
+        """返回目标路径所属的分类目录名，不在任何分类内时返回空串。"""
+        for mon_path in [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]:
+            root = Path(mon_path)
+            if not target.is_absolute():
+                continue
+            name = match_category(target, root, list_category_dirs(root))
+            if name:
+                return name
+        return ""
+
 
     # ------------------------------------------------------------------
     # 媒体库扫描：区分电影 / 电视剧，识别季、单集与电影多版本
@@ -594,6 +708,7 @@ class StrmScraper(_PluginBase):
             root = Path(mon_path)
             if not root.exists():
                 continue
+            categories = list_category_dirs(root)
             found = scan_strm_files(root, skip=self.__is_excluded)
             if len(found) >= MAX_SCAN_FILES:
                 logger.warn(f"STRM列表扫描达到上限 {MAX_SCAN_FILES}，结果可能不完整")
@@ -611,6 +726,10 @@ class StrmScraper(_PluginBase):
                 entry = groups.setdefault(str(series_root), {
                     "path": str(series_root),
                     "title": series_root.name,
+                    "category": match_category(series_root, root, categories),
+                    "category_dir": str(root / match_category(series_root, root, categories))
+                    if match_category(series_root, root, categories) else "",
+                    "root": str(root),
                     "files": [],
                 })
                 try:
@@ -651,6 +770,9 @@ class StrmScraper(_PluginBase):
                 result.append({
                     "path": root_path,
                     "title": entry["title"],
+                    "category": entry["category"],
+                    "category_dir": entry["category_dir"],
+                    "root": entry["root"],
                     "type": "tv",
                     "total_files": len(files),
                     "total_episodes": len(files),
@@ -670,6 +792,9 @@ class StrmScraper(_PluginBase):
                 result.append({
                     "path": root_path,
                     "title": entry["title"],
+                    "category": entry["category"],
+                    "category_dir": entry["category_dir"],
+                    "root": entry["root"],
                     "type": "movie",
                     "total_files": len(versions),
                     "total_episodes": 0,
@@ -680,6 +805,60 @@ class StrmScraper(_PluginBase):
                     "last_scrape": max((v["modify_time"] for v in versions), default=0),
                 })
         return sorted(result, key=lambda x: x["title"])
+
+    def __collect_categories(self) -> List[Dict[str, Any]]:
+        """
+        汇总监控目录下的分类分组，供界面按分类浏览与按分类刷新。
+
+        每个分类返回名称、绝对路径、媒体数与待刮削数；不在任何分类内的媒体
+        统一归到「未分类」分组（``path`` 为空），保证界面不会漏掉媒体。
+        """
+        groups: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        for mon_path in [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]:
+            root = Path(mon_path)
+            if not root.exists():
+                continue
+            for name in list_category_dirs(root):
+                key = str(root / name)
+                if key in groups:
+                    continue
+                groups[key] = {
+                    "name": name,
+                    "path": key,
+                    "root": str(root),
+                    "total": 0,
+                    "unscraped": 0,
+                    "movie": 0,
+                    "tv": 0,
+                }
+                order.append(key)
+            # 未分类分组固定放在末尾，只在该监控目录存在散装媒体时才出现
+            loose = str(root)
+            if loose not in groups:
+                groups[loose] = {
+                    "name": "未分类",
+                    "path": "",
+                    "root": str(root),
+                    "total": 0,
+                    "unscraped": 0,
+                    "movie": 0,
+                    "tv": 0,
+                }
+                order.append(loose)
+
+        for item in self.__list_items():
+            bucket = groups.get(item.get("category_dir") or "") or groups.get(item.get("root", ""))
+            if not bucket:
+                continue
+            bucket["total"] += 1
+            bucket["unscraped"] += 1 if item.get("unscraped") else 0
+            bucket[item["type"]] = bucket.get(item["type"], 0) + 1
+
+        # 没有散装媒体时把「未分类」占位分组去掉，避免界面上出现空分类
+        result = [groups[key] for key in order if groups[key]["total"] or groups[key]["path"]]
+        return sorted(result, key=lambda x: (x["name"] == "未分类", x["name"]))
+
 
     def __list_items(self, force: bool = False) -> List[Dict[str, Any]]:
         """
@@ -698,6 +877,10 @@ class StrmScraper(_PluginBase):
     def __submit_task(self, paths: List[str], target: str, overwrite: Optional[bool]) -> str:
         """
         提交一个后台刮削任务并返回任务ID
+
+        走主程序共享线程池（``ThreadHelper``）而非裸 ``threading.Thread``：受
+        ``CONF.threadpool`` 上限约束，避免用户连点导致线程数失控；同时传播上下文
+        并在应用关闭时由本体统一收敛。
         """
         task_id = uuid.uuid4().hex[:12]
         with self._task_lock:
@@ -712,42 +895,47 @@ class StrmScraper(_PluginBase):
                 "results": [],
                 "started": time.time(),
             }
-        threading.Thread(
-            target=self.__run_task, args=(task_id, paths, target, overwrite), daemon=True
-        ).start()
+        ThreadHelper().submit(self.__run_task, task_id, paths, target, overwrite)
         return task_id
 
     def __run_task(self, task_id: str, paths: List[str], target: str, overwrite: Optional[bool]):
         """
         执行后台刮削任务并更新任务状态
+
+        任务体整体包在 try 里：线程池 worker 内部抛出的异常不会有人接收，
+        否则任务会永远停在 running。
         """
-        for raw in paths:
-            try:
-                path = Path(raw)
-                if target == "file":
-                    # 用户显式触发的刮削一律绕过去重窗口，避免 10 分钟内点了没反应
-                    with lock:
-                        self._scraped.pop(f"file:{path}", None)
-                    ok, msg = self.__scrape_file(path, overwrite)
-                else:
-                    with lock:
-                        self._scraped.pop(f"dir:{path}", None)
-                    ok, msg = self.__scrape_dir(path, overwrite)
-            except Exception as e:  # noqa: BLE001
-                ok, msg = False, str(e)
+        try:
+            for raw in paths:
+                try:
+                    path = Path(raw)
+                    if target == "file":
+                        # 用户显式触发的刮削一律绕过去重窗口，避免 10 分钟内点了没反应
+                        with lock:
+                            self._scraped.pop(f"file:{path}", None)
+                        ok, msg = self.__scrape_file(path, overwrite)
+                    else:
+                        with lock:
+                            self._scraped.pop(f"dir:{path}", None)
+                        ok, msg = self.__scrape_dir(path, overwrite)
+                except Exception as e:  # noqa: BLE001
+                    ok, msg = False, str(e)
+                with self._task_lock:
+                    task = self._tasks.get(task_id)
+                    if not task:
+                        break
+                    task["done"] += 1
+                    task["success" if ok else "failed"] += 1
+                    task["results"].append({"path": raw, "success": ok, "message": msg})
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"STRM刮削任务异常终止 {task_id}：{str(e)} - {traceback.format_exc()}")
+        finally:
             with self._task_lock:
                 task = self._tasks.get(task_id)
-                if not task:
-                    break
-                task["done"] += 1
-                task["success" if ok else "failed"] += 1
-                task["results"].append({"path": raw, "success": ok, "message": msg})
-        with self._task_lock:
-            task = self._tasks.get(task_id)
-            if task and task.get("status") != "canceled":
-                task["status"] = "done"
-                task["finished"] = time.time()
-        self._list_cache = {"time": 0.0, "items": []}
+                if task and task.get("status") != "canceled":
+                    task["status"] = "done"
+                    task["finished"] = time.time()
+            self._list_cache = {"time": 0.0, "items": []}
 
     def __scrape_dir(self, target_dir: Path, overwrite: Optional[bool] = None) -> Tuple[bool, str]:
         """
@@ -781,7 +969,7 @@ class StrmScraper(_PluginBase):
                 "endpoint": self.api_scan,
                 "methods": ["GET"],
                 "summary": "STRM全量刮削",
-                "description": "触发一次全量扫描刮削，force=true 时忽略「跳过已刮削」开关",
+                "description": "触发一次全量扫描刮削，scope=category 时只扫 paths 指定的分类目录",
             },
             {
                 "path": "/strm_rescrape",
@@ -797,7 +985,31 @@ class StrmScraper(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "触发全量扫描",
-                "description": "后台启动一次全量扫描，force=true 时忽略「跳过已刮削」开关",
+                "description": "后台启动一次全量扫描；scope=category 时只扫 paths 指定的分类目录",
+            },
+            {
+                "path": "/categories",
+                "endpoint": self.api_categories,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "STRM分类分组",
+                "description": "返回监控目录下按一级子目录识别的分类分组（国漫/日番/国产剧等）及统计",
+            },
+            {
+                "path": "/records",
+                "endpoint": self.api_records,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "STRM刮削记录",
+                "description": "返回最近若干条刮削记录（时间、目标、分类、结果）",
+            },
+            {
+                "path": "/records/clear",
+                "endpoint": self.api_records_clear,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "清空刮削记录",
+                "description": "删除插件数据目录下的刮削记录文件",
             },
             {
                 "path": "/overview",
@@ -948,34 +1160,91 @@ class StrmScraper(_PluginBase):
             return RedirectResponse(url=remote, status_code=302)
         raise HTTPException(status_code=404, detail="poster not found")
 
-    def api_scan(self, force: bool = False) -> schemas.Response:
-        """后台启动一次全量扫描刮削，立即返回以免阻塞请求。"""
-        threading.Thread(target=self.full_scan, kwargs={"force": force}, daemon=True).start()
+    def api_scan(self, force: bool = False, scope: str = "all", paths: str = "") -> schemas.Response:
+        """
+        后台启动一次全量扫描刮削，立即返回以免阻塞请求。
+
+        :param force: 兼容历史调用方保留，当前不影响行为；覆盖与否统一由插件开关决定
+        :param scope: ``all``=全部监控目录；``category``=只扫 ``paths`` 指定的分类目录
+        :param paths: ``scope=category`` 时用逗号分隔的分类目录绝对路径
+        """
+        targets = [p.strip() for p in (paths or "").split(",") if p.strip()]
+        if scope == "category" and not targets:
+            return schemas.Response(success=False, message="未指定要刷新的分类目录")
+        if scope == "category":
+            illegal = [p for p in targets if not self.__is_allowed(p)]
+            if illegal:
+                return schemas.Response(success=False, message="存在不在监控目录范围内的路径")
+        if self._running:
+            return schemas.Response(
+                success=False, message="已有全量扫描在执行中，请等它结束或稍后重试"
+            )
+        # 用主程序共享线程池而非裸 threading.Thread：受 CONF.threadpool 约束、
+        # 传播上下文，并在应用关闭时由本体统一收敛，不会留下游离线程。
+        self._running = True
+        try:
+            ThreadHelper().submit(self.__scan_worker, force, scope, targets)
+        except Exception as e:
+            self._running = False
+            logger.error(f"提交全量扫描任务失败：{e}")
+            return schemas.Response(success=False, message=f"提交扫描任务失败：{e}")
+        if scope == "category":
+            return schemas.Response(success=True, message=f"已按分类启动扫描（{len(targets)} 个分类）")
         return schemas.Response(success=True, message="全量扫描已在后台启动")
 
+    def __scan_worker(self, force: bool, scope: str, paths: List[str]):
+        """全量扫描的线程池执行体：保证 ``_running`` 一定被复位。"""
+        try:
+            self.full_scan(force=force, scope=scope, paths=paths)
+            self._list_cache = {"time": 0.0, "items": []}
+        except Exception as e:
+            logger.error(f"全量扫描执行失败：{str(e)} - {traceback.format_exc()}")
+        finally:
+            self._running = False
+
+    def api_categories(self) -> Dict[str, Any]:
+        """返回监控目录下的分类分组列表（含媒体数与待刮削数）。"""
+        return self.__envelope(self.__collect_categories())
+
+    def api_records(self, limit: int = 100) -> Dict[str, Any]:
+        """返回最近的刮削记录（默认最多 100 条，倒序）。"""
+        records = self.__load_records()
+        try:
+            size = max(1, min(int(limit), RECORD_LIMIT))
+        except (TypeError, ValueError):
+            size = 100
+        return self.__envelope(list(reversed(records[-size:])))
+
+    def api_records_clear(self) -> Dict[str, Any]:
+        """清空已落盘的刮削记录。"""
+        try:
+            path = self.__record_path()
+            if path.exists():
+                path.unlink()
+            return self.__envelope(None, True, "刮削记录已清空")
+        except Exception as e:
+            return self.__envelope(None, False, f"清空刮削记录失败：{e}")
+
     def api_rescrape(self, path: str, apikey: str = "") -> schemas.Response:
-        """对单个合集目录执行覆盖重刮"""
+        """对单个合集目录执行覆盖重刮（后台执行，立即返回）"""
         from app.core.config import settings
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
         target = Path(path)
         if not target.exists():
             return schemas.Response(success=False, message=f"目录不存在：{path}")
-        # 临时开启覆盖，绕过去重 TTL
-        old_overwrite = self._overwrite
-        self._overwrite = True
         # 清除该目录的去重缓存（dir / file 两种 key 都清，兼容历史版本写入）
         key = str(target)
         with lock:
             self._scraped.pop(key, None)
             self._scraped.pop(f"dir:{key}", None)
+        # 覆盖模式通过任务参数下传，不再临时改写实例属性：那条路径既会污染
+        # 其他并发刮削的语义，try/finally 之间还夹着同步刮削，异常时属性可能回滚不及时。
         try:
-            self.__scrape(target)
-            return schemas.Response(success=True, message=f"已触发重新刮削：{path}")
+            task_id = self.__submit_task([str(target)], "dir", True)
         except Exception as e:
-            return schemas.Response(success=False, message=f"刮削失败：{e}")
-        finally:
-            self._overwrite = old_overwrite
+            return schemas.Response(success=False, message=f"提交刮削任务失败：{e}")
+        return schemas.Response(success=True, message=f"已触发重新刮削：{path}", data={"task_id": task_id})
 
     # ------------------------------------------------------------------
     # 前端联邦界面专用接口（Vue 侧栏页 AppPage 调用）
@@ -1002,6 +1271,9 @@ class StrmScraper(_PluginBase):
             "total_files": sum(i["total_files"] for i in items),
             "monitor_dirs": [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()],
             "monitoring": bool(self._observer),
+            "scanning": self._running,
+            "overwrite": self._overwrite,
+            "categories": self.__collect_categories(),
         }
         return self.__envelope(overview)
 
@@ -1155,8 +1427,8 @@ class StrmScraper(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
-                                            "model": "skip_scraped",
-                                            "label": "全量扫描跳过已刮削",
+                                            "model": "sidebar_enabled",
+                                            "label": "显示侧栏入口",
                                         },
                                     }
                                 ],
@@ -1168,8 +1440,8 @@ class StrmScraper(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
-                                            "model": "sidebar_enabled",
-                                            "label": "显示侧栏入口",
+                                            "model": "record_enabled",
+                                            "label": "记录刮削历史",
                                         },
                                     }
                                 ],
@@ -1203,35 +1475,6 @@ class StrmScraper(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "cron_enabled", "label": "启用定时全量刷新"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 8},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cron_expression",
-                                            "label": "Cron 表达式（分 时 日 月 周）",
-                                            "placeholder": "如 0 4 * * * 表示每天 04:00",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -1239,8 +1482,9 @@ class StrmScraper(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "启用后通过主程序定时器（APScheduler）按上述 Cron 表达式自动全量刷新刮削；"
-                                                    "关闭或改表达式会自动重新注册，无需重启。",
+                                            "text": "全量扫描会遍历监控目录下所有 .strm；刮削是否覆盖已有 NFO 与图片"
+                                                    "由「覆盖已有元数据」决定。电视剧分类分组按监控目录下的一级"
+                                                    "子目录自动识别（如国漫/日番/国产剧），可按分类单独刷新。",
                                         },
                                     }
                                 ],
@@ -1313,13 +1557,11 @@ class StrmScraper(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "overwrite": False,
-            "skip_scraped": True,
             "mode": "compatibility",
             "monitor_dirs": "",
             "exclude_keywords": "",
-            "cron_enabled": False,
-            "cron_expression": "0 4 * * *",
             "sidebar_enabled": True,
+            "record_enabled": True,
         }
 
     def get_page(self) -> Optional[List[dict]]:

@@ -1,14 +1,15 @@
 {
   "StrmScraper": {
     "name": "STRM监控刮削",
-    "description": "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），记录完全由主程序管理。V3 专用插件。",
+    "description": "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），界面按分类目录分组，支持按分类刷新，刮削记录落插件数据目录。V3 专用插件。",
     "labels": "刮削,STRM,监控",
-    "version": "3.1.1",
+    "version": "3.2.0",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/strmscraper.png",
     "author": "157888390",
     "level": 2,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.2.0": "新增：1)界面按电视剧分类目录分组——自动识别「库根/分类名/剧名」中的分类层（依据主程序 category.yaml 的国漫/日番/国产剧/欧美剧/日韩剧/纪录片/儿童/综艺/未分类等），AppPage 与 Page 均新增分类筛选条，各分类显示总数与待刮数，可只对某个分类执行全量刷新；2)全量刷新支持按分类/按指定目录执行（api_scan 新增 scope 参数，full_scan 支持 paths 过滤），并加 _running 互斥守卫避免并发堆积；3)新增刮削记录：用 get_data_path()/scrape_records.json 持久化每次刮削的时间/类型/标题/分类/结果/消息（上限 500 条），界面新增「刮削记录」面板与 /records、/records/clear 接口与「记录刮削历史」开关；4)主体多线程改用主程序共享线程池 ThreadHelper（原先裸 threading.Thread），event_handler、异步任务、全量刷新统一走 ThreadHelper().submit，异步任务包 try/except/finally 确保状态必然收敛；5)移除定时刷新功能（cron_enabled/cron_expression 配置项与 get_service/scheduled_full_scan）与「跳过已刮削」开关（skip_scraped），是否重写元数据完全由「覆盖已有刮削结果」开关决定；6)/rescrape 不再修改全局 overwrite 状态，改为按次强制覆盖。",
       "v3.1.1": "按 create-moviepilot-plugin 规范对齐：补齐模块 docstring、类 docstring 与 init_plugin/get_state/get_api/get_form/api_scan/__scrape/__save_config 等方法的中文 docstring；新增 plugin_label 类属性并与 package.v3.json 的 labels 保持一致；get_api 中供 Vue 侧栏页调用的接口保留 auth=bear，/strm_scan 与 /strm_rescrape 维持默认 apikey 供外部调用。纯文档与元数据，行为不变。",
       "v3.1.0": "新增：1)插件详情页（Page）改为完整状态面板——监控状态/监控目录数、五格统计卡、类型筛选、关键词搜索与带海报的媒体列表，状态点区分已刮削/部分/未刮削；2)新增「显示侧栏入口」开关（sidebar_enabled，默认开启），关闭后主界面侧栏不再注册入口，仍可从插件中心进入；3)修复海报显示：新增 /cover 接口，优先读取媒体目录内刮削产出的本地海报（poster/folder/cover/tvshow 等），缺失时按目录名 [tmdbid=xxx] 查询 TMDB 后 302 跳转，均未命中返回 404 由前端回退渐变占位图，端点仅放行监控目录内的海报文件名（防目录穿越）并缓存 TMDB 查询结果；4)侧栏页与设置弹窗之外，AppPage 头部新增「设置」按钮，直接内嵌配置面板读写 plugin/form 与 PUT plugin/<id>，保存后热刷新；5)插件图标更换为新的 256x256 图标",
       "v3.0.0": "新增电影/电视剧与多版本识别：按季分组并解析季号集号，电影目录下多个无集号特征的 .strm 标记为多版本；新增单文件刮削（电视剧单集、电影指定版本），文件项优先走存储链解析以兼容 CloudDrive2/alist/rclone 挂载，取不到时兜底构造本地 FileItem；新增 overview/items/files/scrape/tasks 五个 bear 接口与异步任务队列，接口路径限制在监控目录内；新增 get_render_mode/get_sidebar_nav，构建联邦产物后自动出现侧栏全页入口；移除 scrape_history 刮削历史与 TMDB/本地/SVG 海报兜底逻辑（海报实测不显示），详情页简化为运行状态提示，海报墙与历史改由 Vue 侧栏页实现；新增「全量扫描跳过已刮削」开关（默认开启）——实测宿主的「文件已存在，跳过」只对 backdrop 生效，其余 8~9 种图片每次全量扫描都会重下，13 个媒体重扫 134 张图耗时 4 分 35 秒，开启后已刮削目录整目录跳过，/strm_scan?force=true 可强制重刮；新增 Vue 联邦前端（AppPage 侧栏全页工作台 + Config 配置页 + Page 概览，Vuetify 主题变量适配明暗），构建产物已随插件附带，新增 bear 认证的 /scan 接口供前端调用",
