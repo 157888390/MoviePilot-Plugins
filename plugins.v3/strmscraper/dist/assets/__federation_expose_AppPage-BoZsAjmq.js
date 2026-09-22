@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import ConfigPanel from './__federation_expose_Config-Bzc_Ri8m.js';
+import ConfigPanel from './__federation_expose_Config-eY35RbqA.js';
 import { m as makeApiCall, v as versionLabel, c as categoryColor, p as posterStyle, a as coverUrl, s as statusOf, f as formatSize, u as unwrap, b as bodyOf } from './strm-CfZmxq-8.js';
 import { _ as _export_sfc } from './_plugin-vue_export-helper-pcqpp-6-.js';
 

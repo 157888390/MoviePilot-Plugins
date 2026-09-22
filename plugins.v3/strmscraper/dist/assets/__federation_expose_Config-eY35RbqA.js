@@ -102,7 +102,9 @@ async function scanNow(force) {
   notice.value = '';
   try {
     await apiCall('get', force ? '/scan?force=true' : '/scan');
-    notice.value = force ? '已在后台启动强制全量扫描' : '已在后台启动全量扫描（跳过已刮削）';
+    notice.value = force
+      ? '已在后台启动强制全量扫描（按「覆盖已有刮削结果」重刮）'
+      : '已在后台启动全量扫描';
   } catch (scanError) {
     error.value = scanError?.message || '触发全量扫描失败';
   } finally {
@@ -229,10 +231,11 @@ return (_ctx, _cache) => {
       ]),
       _cache[21] || (_cache[21] = _createElementVNode("p", { class: "cfg-tip" }, "网络挂载目录（CloudDrive2 / rclone / SMB 等）请选择兼容模式。", -1)),
       _cache[22] || (_cache[22] = _createElementVNode("p", { class: "cfg-tip" }, [
-        _createTextVNode(" 电视剧分类分组按监控目录下的"),
-        _createElementVNode("strong", null, "一级子目录"),
-        _createTextVNode("自动识别（国漫 / 日番 / 国产剧 / 欧美剧 等）， 无需配置；全量扫描可在侧栏页按分类单独执行。 ")
-      ], -1))
+        _createTextVNode(" 分类分组按监控目录下的"),
+        _createElementVNode("strong", null, "分类目录层"),
+        _createTextVNode("自动识别（国漫 / 日番 / 国产剧 / 欧美剧 等， 即「库根 / 分类名 / 剧名」中的中间那层），无需配置； 没有分类层时剧名直接挂在监控根下，计入「未分类」。全量扫描可在侧栏页按分类单独执行。 ")
+      ], -1)),
+      _cache[23] || (_cache[23] = _createElementVNode("p", { class: "cfg-tip" }, " 「覆盖已有刮削结果」关闭时只补缺失元数据；开启（或点界面上的「强制全量」）才会整目录重刮覆盖。 ", -1))
     ]),
     _createElementVNode("div", _hoisted_15, [
       _createElementVNode("button", {
@@ -261,6 +264,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ConfigPanel = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-aed9cbf4"]]);
+const ConfigPanel = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-23e75cd4"]]);
 
 export { ConfigPanel as default };
