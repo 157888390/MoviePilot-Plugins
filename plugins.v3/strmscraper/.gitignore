@@ -1,0 +1,9 @@
+# 前端构建的本地依赖与中间产物，不入库
+node_modules/
+.vite/
+# vite 打包配置文件时产生的临时产物（Windows 下偶发残留）
+vite.config.js.timestamp-*.mjs
+
+# Python 运行期缓存
+__pycache__/
+*.py[cod]
