@@ -14,7 +14,9 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 | 插件版本 | `1.1.1` | `3.3.0`（主版本跃迁） |
 | 刮削入口 | `MediaChain().scrape_metadata()` | `ScrapingChain().scrape_metadata()` |
 | 日志 | `from app.log import logger` | `from app.sdk.logging import logger` |
-| 文件项 | `StorageChain().get_file_item()` | 先用 `StorageChain().get_file_item()` 按 local→已配置存储（CloudDrive2/alist/rclone）顺序解析，取不到时兜底手工构造 `schemas.FileItem`（参考 `libraryscraper` V3 写法） |
+| 插件基类 | `from app.plugins import _PluginBase`（走 Compat 层） | `from app.sdk.plugin import _PluginBase` |
+| 数据结构 | `from app import schemas` → `schemas.FileItem` / `schemas.Response` | `from app.schemas.file import FileItem`、`from app.schemas.response import Response`（canonical 归属模块） |
+| 文件项 | `StorageChain().get_file_item()` | 先用 `StorageChain().get_file_item()` 按 local→已配置存储（CloudDrive2/alist/rclone）顺序解析，取不到时兜底手工构造 `FileItem`（参考 `libraryscraper` V3 写法） |
 | 并发 | 裸 `threading.Thread` | 主程序共享线程池 `app.runtime.thread.ThreadHelper` |
 | 旧索引 | 同名条目新增 `"v3": false`，避免 V3 回退加载旧合同实现 | — |
 

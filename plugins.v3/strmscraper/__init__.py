@@ -34,12 +34,13 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
-from app import schemas
 from app.chain.scraping import ScrapingChain
 from app.chain.storage import StorageChain
-from app.plugins import _PluginBase
 from app.runtime.thread import ThreadHelper
+from app.schemas.file import FileItem
+from app.schemas.response import Response
 from app.sdk.logging import logger
+from app.sdk.plugin import _PluginBase
 
 # 只保护 _scraped 去重表。刮削本身的互斥不靠这把锁，而是由「队列唯一的消费线程」保证：
 # 全文只有 __worker_loop 一个线程会调用 __scrape_target，因此不存在并发刮削同一目录的可能。
@@ -546,7 +547,7 @@ class StrmScraper(_PluginBase):
             return True
 
     @staticmethod
-    def __fallback_file_item(target: Path, target_type: str) -> schemas.FileItem:
+    def __fallback_file_item(target: Path, target_type: str) -> FileItem:
         """
         无法从存储链解析时手工构造本地文件项作为兜底
 
@@ -555,7 +556,7 @@ class StrmScraper(_PluginBase):
         """
         # 目录必须以 / 结尾，主程序据此判定目录刮削分支
         item_path = target.as_posix() + "/" if target_type == "dir" else target.as_posix()
-        return schemas.FileItem(
+        return FileItem(
             storage="local",
             type=target_type,
             path=item_path,
@@ -1766,7 +1767,7 @@ class StrmScraper(_PluginBase):
 
     def api_scan(
         self, overwrite: Optional[bool] = None, scope: str = "all", paths: str = ""
-    ) -> schemas.Response:
+    ) -> Response:
         """
         把一次扫描并入刮削队列，立即返回以免阻塞请求。
 
@@ -1783,19 +1784,19 @@ class StrmScraper(_PluginBase):
         targets = [p.strip() for p in (paths or "").split(",") if p.strip()]
         if scope == "category":
             if not targets:
-                return schemas.Response(success=False, message="未指定要刷新的分类目录")
+                return Response(success=False, message="未指定要刷新的分类目录")
             illegal = [p for p in targets if not self.__is_allowed(p)]
             if illegal:
-                return schemas.Response(success=False, message="存在不在监控目录范围内的路径")
+                return Response(success=False, message="存在不在监控目录范围内的路径")
         if scope not in ("all", "category", "incremental", "unscraped"):
-            return schemas.Response(success=False, message=f"不支持的 scope：{scope}")
+            return Response(success=False, message=f"不支持的 scope：{scope}")
         result = self.__enqueue_scan(scope=scope, paths=targets, overwrite=overwrite)
         if not result["queued"]:
-            return schemas.Response(
+            return Response(
                 success=True, message="该扫描已在队列中，或已被范围更大的扫描覆盖", data=result
             )
         if scope == "category":
-            return schemas.Response(
+            return Response(
                 success=True,
                 message=f"已按分类加入扫描队列（{len(targets)} 个分类）",
                 data=result,
@@ -1804,7 +1805,7 @@ class StrmScraper(_PluginBase):
             "incremental": "增量扫描",
             "unscraped": "补漏扫描",
         }.get(scope, "全量扫描")
-        return schemas.Response(success=True, message=f"{scope_label}已加入队列", data=result)
+        return Response(success=True, message=f"{scope_label}已加入队列", data=result)
 
     def api_categories(self) -> Dict[str, Any]:
         """返回监控目录下的分类分组列表（含媒体数与待刮削数）。"""
@@ -1870,29 +1871,29 @@ class StrmScraper(_PluginBase):
         except Exception as e:
             return self.__envelope(None, False, f"清空刮削记录失败：{e}")
 
-    def api_rescrape(self, path: str, apikey: str = "") -> schemas.Response:
+    def api_rescrape(self, path: str, apikey: str = "") -> Response:
         """把单个合集目录以覆盖模式并入刮削队列（立即返回）。"""
         from app.sdk.config import settings
         if apikey != settings.API_TOKEN:
-            return schemas.Response(success=False, message="API密钥错误")
+            return Response(success=False, message="API密钥错误")
         # 统一 resolve 后再入队：保证 key 与 __is_allowed 的口径一致，避免符号链接/
         # 相对路径导致同一目录被当成两个不同目标重复入队或漏判越界。
         try:
             target = Path(path).resolve()
         except OSError:
-            return schemas.Response(success=False, message=f"目录无法解析：{path}")
+            return Response(success=False, message=f"目录无法解析：{path}")
         if not target.exists():
-            return schemas.Response(success=False, message=f"目录不存在：{path}")
+            return Response(success=False, message=f"目录不存在：{path}")
         # 与其它写接口口径一致：只允许刮削监控目录范围内的路径
         if not self.__is_allowed(str(target)):
-            return schemas.Response(success=False, message="目录不在监控目录范围内")
+            return Response(success=False, message="目录不在监控目录范围内")
         # 覆盖模式随条目入队，不再临时改写实例属性：那条路径会污染其它并发刮削的语义
         result = self.__enqueue(
             [{"key": f"dir:{target}", "kind": "dir", "target": str(target)}],
             overwrite=True,
             source="user",
         )
-        return schemas.Response(
+        return Response(
             success=True, message=f"已加入重新刮削队列：{path}", data=result
         )
 

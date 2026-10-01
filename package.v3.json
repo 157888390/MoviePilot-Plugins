@@ -8,7 +8,7 @@
     "author": "157888390",
     "level": 1,
     "release": true,
-    "system_version": ">=3.0.0",
+    "system_version": ">=3.0.3",
     "history": {
       "v3.2.1": "接入 LX Sync Server；支持搜索/歌单/下载与远程命令"
     }
@@ -22,7 +22,7 @@
     "author": "157888390",
     "level": 1,
     "release": true,
-    "system_version": ">=3.0.0",
+    "system_version": ">=3.0.3",
     "history": {
       "v3.3.0": "移除侧栏入口并入详情页；新增音乐类型识别；修复全量扫描失效",
       "v3.2.0": "按分类目录分组；/scan 支持 scope；新增刮削记录；移除定时刷新",

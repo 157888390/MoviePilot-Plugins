@@ -20,10 +20,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body
 
-from app.plugins import _PluginBase
-from app.schemas.types import EventType, NotificationType
+from app.schemas.types import EventType, MessageType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
+from app.sdk.plugin import _PluginBase
 
 from .downloader import LxDownloader, split_artists
 from .lxserver import SUPPORTED_SOURCES, LxServerClient, LxServerError
@@ -448,7 +448,7 @@ class LxMusicDownloader(_PluginBase):
         event_data = event.event_data or {}
         self.post_message(
             channel=event_data.get("channel"),
-            mtype=NotificationType.Plugin,
+            mtype=MessageType.Plugin,
             title=title,
             text=text,
             userid=self._command_user(event),
@@ -687,7 +687,7 @@ class LxMusicDownloader(_PluginBase):
         except LxServerError as err:
             logger.warn(f"LX 服务端凭据校验失败：{err}")
             self.post_message(
-                mtype=NotificationType.Plugin,
+                mtype=MessageType.Plugin,
                 title="LX 音源下载",
                 text=f"服务端凭据校验失败，请检查配置：{err}",
             )
