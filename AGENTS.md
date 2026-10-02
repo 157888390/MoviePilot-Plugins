@@ -89,8 +89,19 @@ MOVIEPILOT_BACKEND_PATH=<MoviePilot 后端目录> python check_v3_imports.py
 
 ## 6. 版本与版本历史
 
-三处必须一致：**索引 `package.v3.json` 的 `version`、插件类的 `plugin_version`、
-该条目 `history` 的首项**。`history` 以当前版本置顶，其余按语义版本**降序排列**。
+**门禁强制的三处必须一致**：索引 `package.v3.json` 的 `version`、插件类的 `plugin_version`、
+该条目 `history` 的首项。`history` 以当前版本置顶，其余按语义版本**降序排列**。
+
+**实际发版要改 6 处**（门禁只校验前 3 处，漏改不会报错但会造成文档与构建产物版本不一致）：
+
+| # | 位置 | 内容 |
+|---|------|------|
+| 1 | `plugins.v3/<id>/__init__.py` | `plugin_version` |
+| 2 | `package.v3.json`（根） | 该条目的 `version` + `history` 首项 |
+| 3 | `plugins.v3/<id>/package.json` | `version`（构建工具侧，最易漏） |
+| 4 | `README.md`（根） | 插件表格的版本列 |
+| 5 | `plugins.v3/<id>/README.md` | V3 迁移要点表格的「插件版本」行 |
+| 6 | `plugins.v3/<id>/README.md` | 新增 `### vX.Y.Z` 变更摘要段落 |
 
 **生成或更新版本历史时，必须使用精简模式：**
 
