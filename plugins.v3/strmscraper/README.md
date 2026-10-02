@@ -11,7 +11,7 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 |------|------|------|
 | 插件目录 | `plugins.v2/strmscraper` | `plugins.v3/strmscraper` |
 | 索引文件 | `package.v2.json` | `package.v3.json`（`system_version: ">=3.0.0"`） |
-| 插件版本 | `1.1.1` | `3.3.0`（主版本跃迁） |
+| 插件版本 | `1.1.1` | `3.3.4`（主版本跃迁） |
 | 刮削入口 | `MediaChain().scrape_metadata()` | `ScrapingChain().scrape_metadata()` |
 | 日志 | `from app.log import logger` | `from app.sdk.logging import logger` |
 | 插件基类 | `from app.plugins import _PluginBase`（走 Compat 层） | `from app.sdk.plugin import _PluginBase` |
@@ -28,6 +28,15 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 - **详情页**：未构建联邦产物时给出最简运行状态提示
 
 ## 版本变更摘要
+
+### v3.3.4
+
+- **媒体库支持末级分类筛选**：`/items` 新增 `category` 查询参数；`__collect_items` 新增 `deepest_category()`，把 `category` 字段改为媒体所在的**最末级分类目录名**（日番 / 国产剧 / 国漫 / 欧美剧 / 动画电影 / 华语电影 / 外语电影），层级不足 2 时回退一级分类名；`category_dir` 仍指向一级分类目录，`/overview` 的分类统计口径不变。
+- **详情页 UI 全新重做**：媒体库改为「左侧固定分类侧边栏 + 右侧内容独立滚动」，顶栏改为面包屑 + 大标题 + `媒体库 / 刮削记录` 分段控件，统计条精简为「待刮削 / 已刮 / 失败」三卡片。
+- **队列面板与刮削记录改版**：队列状态条改为状态点 + 渐变流光进度条，统计拆成成功 / 失败 / 已取消 / 排队四个胶囊；刮削记录改为时间轴式两行布局（状态点 + 标题标签 + 消息 + 右侧徽章与时间），每行左侧带状态色条。
+- **修复扫描下拉被海报遮挡**：`.strm-head` 补 `z-index`，下拉菜单不再被海报卡浮层盖住；扫描菜单改为点击展开 + 点外部 / Esc 关闭。
+- **修复队列状态条被压扁**：`.strm-queue` / `.strm-alert` 补 `flex-shrink: 0`，避免在 flex 列布局里被内容区挤成细缝。
+- **加载态与反馈优化**：扫描时显示骨架卡网格（shimmer）替代单行文字；统计卡数字改渐变文字、hover 上浮并展开顶部彩条；按钮补 hover 上浮与按压回落。
 
 ### v3.3.0
 

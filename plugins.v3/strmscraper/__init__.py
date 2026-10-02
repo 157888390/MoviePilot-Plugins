@@ -186,6 +186,27 @@ def match_category(file_path: Path, root: Path, categories: Iterable[str]) -> st
     return head if head in set(categories) else ""
 
 
+def deepest_category(series_root: Path, root: Path, base_category: str) -> str:
+    """
+    返回媒体所在的最末一级分类目录名（界面「分类」筛选与卡片标签直接引用）。
+
+    取 ``series_root.parent``（剧名 / 片名目录的父目录）相对监控根 ``root`` 的路径：
+    层级 >= 2，即 ``<root>/<一级分类>/<二级分类>/<剧名>`` 时取最后一段，得到
+    「日番」「国产剧」「动画电影」这类末级分类名；只有一层
+    （``<root>/<一级分类>/<剧名>``）或媒体不在任何分类内时，回退 ``base_category``
+    的一级分类名。``series_root`` 取自 ``__series_root``，已跳过季目录。
+
+    :param series_root: 媒体（剧集 / 影片）根目录
+    :param root: 该媒体所属的监控目录
+    :param base_category: ``match_category`` 得到的一级分类目录名，可能为空串
+    :return: 末级分类目录名；无分类信息时返回空串
+    """
+    try:
+        parts = series_root.parent.relative_to(root).parts
+    except ValueError:
+        parts = ()
+    return parts[-1] if len(parts) >= 2 else base_category
+
 
 class _StrmHandler(FileSystemEventHandler):
     """
@@ -231,7 +252,7 @@ class StrmScraper(_PluginBase):
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：本轮移除侧栏入口、新增音乐类型识别、规范化并发与缓存）
-    plugin_version = "3.3.0"
+    plugin_version = "3.3.4"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -982,12 +1003,16 @@ class StrmScraper(_PluginBase):
                 season_dir = rel_parent.split("/")[0] if rel_parent else ""
                 if not season_dir or not SEASON_RE.match(season_dir):
                     season_dir = ""
+                base_category = match_category(series_root, root, categories)
                 entry = groups.setdefault(str(series_root), {
                     "path": str(series_root),
                     "title": series_root.name,
-                    "category": match_category(series_root, root, categories),
-                    "category_dir": str(root / match_category(series_root, root, categories))
-                    if match_category(series_root, root, categories) else "",
+                    # 一级分类目录名：category_dir 的目录名语义，__collect_categories
+                    # 与刮削记录都按它归类，因此这里保持不变。
+                    "base_category": base_category,
+                    # 末级分类目录名（如 日番 / 国产剧 / 动画电影），供界面按分类筛选
+                    "category": deepest_category(series_root, root, base_category),
+                    "category_dir": str(root / base_category) if base_category else "",
                     "root": str(root),
                     "files": [],
                 })
@@ -1016,7 +1041,9 @@ class StrmScraper(_PluginBase):
             max_mtime = max((f["modify_time"] for f in files), default=0)
             # 音乐分类下的条目既没有季目录也没有集号，只按结构判定会落进 movie 分支，
             # 界面因而渲染成「电影」徽标，与分类行「音乐」自相矛盾，故先按分类名拦下。
-            is_music = entry["category"].strip().lower() in MUSIC_CATEGORIES
+            # 音乐判定沿用一级分类名：二级分类（如「华语音乐」）不在 MUSIC_CATEGORIES 里，
+            # 若改用 entry["category"] 会让 <root>/音乐/<二级>/ 下的条目掉回电影分支。
+            is_music = entry["base_category"].strip().lower() in MUSIC_CATEGORIES
             # 剧集判定：存在季目录，或文件名带集号特征
             episode_files = [] if is_music else [
                 f for f in files if f["season"] or self.__episode_no(f["name"])
@@ -1943,11 +1970,29 @@ class StrmScraper(_PluginBase):
         }
         return self.__envelope(overview)
 
-    def api_items(self, refresh: bool = False) -> Dict[str, Any]:
+    def api_items(self, refresh: bool = False, category: str = "") -> Dict[str, Any]:
         """
-        返回媒体清单聚合结果
+        返回媒体清单聚合结果；``category`` 非空时只返回该分类下的媒体。
+
+        ``category`` 同时接受末级分类名（``item["category"]``，如「日番」「动画电影」）
+        与一级分类名 / 一级分类目录（``item["category_dir"]``，如「电视剧」），让界面上
+        的一级与二级分类筛选共用同一个接口。
+
+        :param refresh: 为 True 时跳过硬缓存重扫监控目录
+        :param category: 分类名或一级分类目录路径；留空返回全部
         """
-        return self.__envelope(self.__list_items(force=refresh))
+        items = self.__list_items(force=refresh)
+        target = (category or "").strip()
+        if target:
+            items = [
+                item for item in items
+                if item.get("category") == target
+                or item.get("category_dir") == target
+                # 一级分类名（如「电视剧」）与 category_dir 的目录名比对一次，
+                # 使按一级分类筛选无需传完整路径
+                or Path(str(item.get("category_dir") or "")).name == target
+            ]
+        return self.__envelope(items)
 
     def api_files(self, path: str = "", season: str = "") -> Dict[str, Any]:
         """

@@ -109,32 +109,6 @@ function statusOf(item) {
   return 'pending'
 }
 
-/** 分类分组的固定配色，保证同名分类在不同页面/不同刷新间颜色稳定 */
-const CATEGORY_COLORS = {
-  国漫: '#EC4899',
-  日番: '#8B5CF6',
-  国产剧: '#EF4444',
-  欧美剧: '#3B82F6',
-  日韩剧: '#14B8A6',
-  纪录片: '#F59E0B',
-  儿童: '#22C55E',
-  综艺: '#F97316',
-  音乐: '#F43F5E',
-  未分类: '#94A3B8',
-};
-
-/**
- * 分类标签配色：内置分类用固定色，用户自建分类按名称哈希落到调色板，
- * 保证同一分类名始终得到同一颜色（而不是每次渲染随机变）。
- */
-function categoryColor(name) {
-  const key = String(name || '').trim();
-  if (!key) return CATEGORY_COLORS['未分类']
-  if (CATEGORY_COLORS[key]) return CATEGORY_COLORS[key]
-  const palette = ['#7C5CFC', '#0EA5E9', '#D946EF', '#F43F5E', '#10B981', '#EAB308'];
-  return palette[hashOf(key) % palette.length]
-}
-
 function versionLabel(name) {
   const matched = String(name || '').match(/(2160p|1080p|720p|480p|4K|8K|DoVi|HDR|REMUX|BluRay|WEB|导演剪辑|加长)/i);
   return matched ? matched[1].toUpperCase() : (String(name || '').replace(/\.strm$/i, '') || '版本')
@@ -180,4 +154,4 @@ const _export_sfc = (sfc, props) => {
   return target;
 };
 
-export { STATUS_LABELS as S, _export_sfc as _, coverUrl as a, typeLabel as b, categoryColor as c, formatTime as d, errorLabel as e, formatDate as f, formatSize as g, statusOf as h, makeApiCall as m, posterStyle as p, statusClass as s, typeClass as t, unwrap as u, versionLabel as v };
+export { STATUS_LABELS as S, _export_sfc as _, typeLabel as a, formatTime as b, coverUrl as c, formatSize as d, errorLabel as e, formatDate as f, statusOf as g, makeApiCall as m, posterStyle as p, statusClass as s, typeClass as t, unwrap as u, versionLabel as v };
