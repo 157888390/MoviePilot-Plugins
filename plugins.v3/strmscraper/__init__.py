@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from watchdog.events import FileSystemEventHandler
@@ -100,6 +101,36 @@ POSTER_CACHE_LIMIT = 512
 QUEUE_RECENT_LIMIT = 20
 # /queue 返回的「排队中」条数上限（队列本身不截断，仅展示时截断）
 QUEUE_SNAPSHOT_LIMIT = 50
+# cron 单个字段的合法字符集（数字、通配、区间、步长、枚举；兼容 JAN 这类月/周英文名）
+CRON_FIELD_RE = re.compile(r"^[0-9*,\-/A-Za-z]+$")
+
+
+def normalize_cron(expression: Any) -> str:
+    """
+    把配置里的 cron 表达式规整成标准五段式；留空或非法一律返回空字符串。
+
+    宿主 ``reconcile.py`` 是把这个字符串**直接当成 APScheduler 的触发器**传给
+    ``add_job()`` 的，而 APScheduler 只认 ``cron``/``interval``/``date`` 三个别名或
+    Trigger 实例。所以这里必须先校验成标准五段式，再由调用方
+    ``CronTrigger.from_crontab()`` 转成真正的触发器对象 —— 直接把 "0 4 * * *"
+    塞进 ``trigger`` 只会得到 ``No trigger by the name ... was found``。
+
+    校验分两层：先按字符集和字段数快速挡掉手误（如漏写后三段的 ``0 4``），
+    再交给 ``CronTrigger.from_crontab()`` 做权威解析，两层都通过才算合法。
+    """
+    cron = " ".join(str(expression or "").split())
+    if not cron:
+        return ""
+    fields = cron.split(" ")
+    if len(fields) != 5 or not all(CRON_FIELD_RE.match(field) for field in fields):
+        logger.warn(f"STRM定时扫描：cron 表达式「{expression}」不是标准五段式（分 时 日 月 周），已忽略")
+        return ""
+    try:
+        CronTrigger.from_crontab(cron)
+    except (TypeError, ValueError) as err:
+        logger.warn(f"STRM定时扫描：cron 表达式「{cron}」无法解析，已忽略：{err}")
+        return ""
+    return cron
 
 
 def scan_strm_files(root: Path, skip=None, limit: int = MAX_SCAN_FILES) -> List[Path]:
@@ -252,7 +283,7 @@ class StrmScraper(_PluginBase):
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：本轮移除侧栏入口、新增音乐类型识别、规范化并发与缓存）
-    plugin_version = "3.3.4"
+    plugin_version = "3.3.5"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -2145,18 +2176,21 @@ class StrmScraper(_PluginBase):
     # ------------------------------------------------------------------
     def get_service(self) -> Optional[List[Dict[str, Any]]]:
         """
-        注册定时扫描服务：配置了 ``cron_expression`` 时，到点把一次全量扫描并入队列。
+        注册定时扫描服务：配置了合法 cron 表达式时，到点把一次全量扫描并入队列。
 
-        空表达式返回 None 关闭；用宿主调度器（``get_service`` 契约）而非自建线程，
-        定时器随插件生命周期被宿主统一管理，应用关闭时也会被一并收敛。
+        留空或表达式非法返回 None 关闭；用宿主调度器（``get_service`` 契约）而非
+        自建线程，定时器随插件生命周期被宿主统一管理，应用关闭时也会被一并收敛。
+
+        ``trigger`` 必须是 APScheduler 的 Trigger 实例（官方 FAQ 04 的写法），
+        不能填 cron 字符串 —— 宿主会原样透传给 ``add_job()``。
         """
-        cron = (self._cron_expression or "").strip()
+        cron = normalize_cron(self._cron_expression)
         if not cron:
             return None
         return [{
             "id": "strmscraper_scheduled_scan",
             "name": "STRM定时扫描",
-            "trigger": cron,
+            "trigger": CronTrigger.from_crontab(cron),
             "func": self.__scheduled_scan,
             "kwargs": {},
         }]
@@ -2342,6 +2376,8 @@ class StrmScraper(_PluginBase):
                                             "model": "cron_expression",
                                             "label": "定时扫描（cron 表达式）",
                                             "placeholder": "留空关闭，例如 0 3 * * * 表示每天 03:00 全量补漏扫描一次",
+                                            "hint": "必须是标准五段式：分 时 日 月 周；写不够五段不会定时执行",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],

@@ -1,7 +1,7 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
 import { _ as _export_sfc, u as unwrap } from './_plugin-vue_export-helper-Ddow2Nd0.js';
 
-const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,vModelText:_vModelText} = await importShared('vue');
+const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,vModelCheckbox:_vModelCheckbox,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,vModelText:_vModelText,normalizeClass:_normalizeClass} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "cfg" };
@@ -24,10 +24,16 @@ const _hoisted_11 = ["value"];
 const _hoisted_12 = { class: "cfg-field" };
 const _hoisted_13 = { class: "cfg-field" };
 const _hoisted_14 = { class: "cfg-field" };
-const _hoisted_15 = { class: "cfg-foot" };
-const _hoisted_16 = ["disabled", "title"];
+const _hoisted_15 = {
+  key: 0,
+  class: "cfg-error"
+};
+const _hoisted_16 = { class: "cfg-foot" };
+const _hoisted_17 = ["disabled", "title"];
+const _hoisted_18 = { class: "cfg-foot-right" };
+const _hoisted_19 = ["disabled", "title"];
 
-const {onMounted,reactive,ref} = await importShared('vue');
+const {computed,onMounted,reactive,ref} = await importShared('vue');
 
 
 const _sfc_main = {
@@ -68,6 +74,26 @@ const MODES = [
   { title: '兼容模式（轮询，网络盘用）', value: 'compatibility' },
   { title: '性能模式（inotify，仅本地盘）', value: 'fast' },
 ];
+
+// cron 校验。宿主是把这段字符串**直接当 APScheduler 的触发器**用的，只有 CronTrigger
+// 实例或 "cron"/"interval"/"date" 别名才认，所以手填的表达式必须是标准五段式；
+// 少写几段（例如只想填「0 4」）不会定时跑，而是让宿主直接报服务注册失败。
+// 这里只挡字段数与字符集这类手误，语义正确性仍以后端 CronTrigger.from_crontab 为准。
+const CRON_FIELD = /^[0-9*,\-/A-Za-z]+$/;
+const cronError = computed(() => {
+  const raw = String(config.cron_expression || '').trim();
+  if (!raw) return ''
+  const fields = raw.split(/\s+/);
+  if (fields.length !== 5) return `必须是 5 段（分 时 日 月 周），当前只有 ${fields.length} 段`
+  if (!fields.every(field => CRON_FIELD.test(field))) return '只允许数字、* , - / 以及英文缩写'
+  return ''
+});
+
+/** 失焦时把多余空白收成一个空格，避免「0  3 * * *」这类看不出问题的写法。 */
+function normalizeCron() {
+  const raw = String(config.cron_expression || '').trim();
+  config.cron_expression = raw ? raw.split(/\s+/).join(' ') : '';
+}
 
 onMounted(() => {
   const source = props.initialConfig || {};
@@ -220,33 +246,39 @@ return (_ctx, _cache) => {
         _cache[16] || (_cache[16] = _createElementVNode("span", { class: "cfg-label" }, "定时扫描（cron 表达式）", -1)),
         _withDirectives(_createElementVNode("input", {
           "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((config.cron_expression) = $event)),
-          class: "cfg-input",
+          class: _normalizeClass(["cfg-input", { 'is-invalid': cronError.value }]),
           type: "text",
-          placeholder: "留空关闭，例如 0 3 * * * 表示每天 03:00 全量补漏扫描一次"
-        }, null, 512), [
+          placeholder: "留空关闭，例如 0 3 * * * 表示每天 03:00 全量补漏扫描一次",
+          onBlur: normalizeCron
+        }, null, 34), [
           [_vModelText, config.cron_expression]
-        ])
+        ]),
+        (cronError.value)
+          ? (_openBlock(), _createElementBlock("p", _hoisted_15, _toDisplayString(cronError.value), 1))
+          : _createCommentVNode("", true)
       ]),
       _cache[19] || (_cache[19] = _createElementVNode("p", { class: "cfg-tip" }, "网络挂载目录（CloudDrive2 / rclone / SMB 等）请选择兼容模式。", -1)),
       _cache[20] || (_cache[20] = _createElementVNode("div", { class: "cfg-section" }, "界面", -1)),
       _cache[21] || (_cache[21] = _createElementVNode("p", { class: "cfg-tip" }, " 海报墙、分类筛选、单集/版本刮削与刮削记录都在插件详情页内，不再注册主界面侧栏入口。 ", -1))
     ]),
-    _createElementVNode("div", _hoisted_15, [
+    _createElementVNode("div", _hoisted_16, [
       _createElementVNode("button", {
         class: "cfg-btn ghost",
         disabled: scanning.value,
         title: config.overwrite ? '重下全部 NFO 与图片' : '已有元数据不动，只补未刮的',
         onClick: scanNow
-      }, "全量扫描" + _toDisplayString(config.overwrite ? '（覆盖重刮）' : '（仅补缺失）'), 9, _hoisted_16),
-      _createElementVNode("div", { class: "cfg-foot-right" }, [
+      }, "全量扫描" + _toDisplayString(config.overwrite ? '（覆盖重刮）' : '（仅补缺失）'), 9, _hoisted_17),
+      _createElementVNode("div", _hoisted_18, [
         _createElementVNode("button", {
           class: "cfg-btn ghost",
           onClick: close
         }, "取消"),
         _createElementVNode("button", {
           class: "cfg-btn",
+          disabled: !!cronError.value,
+          title: cronError.value || '保存配置',
           onClick: submit
-        }, "保存")
+        }, "保存", 8, _hoisted_19)
       ])
     ])
   ]))
@@ -254,6 +286,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b7c4eabf"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-928481c3"]]);
 
 export { Config as default };

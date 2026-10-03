@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { unwrap } from '../lib/strm.js'
 
 const props = defineProps({
@@ -34,6 +34,26 @@ const MODES = [
   { title: '兼容模式（轮询，网络盘用）', value: 'compatibility' },
   { title: '性能模式（inotify，仅本地盘）', value: 'fast' },
 ]
+
+// cron 校验。宿主是把这段字符串**直接当 APScheduler 的触发器**用的，只有 CronTrigger
+// 实例或 "cron"/"interval"/"date" 别名才认，所以手填的表达式必须是标准五段式；
+// 少写几段（例如只想填「0 4」）不会定时跑，而是让宿主直接报服务注册失败。
+// 这里只挡字段数与字符集这类手误，语义正确性仍以后端 CronTrigger.from_crontab 为准。
+const CRON_FIELD = /^[0-9*,\-/A-Za-z]+$/
+const cronError = computed(() => {
+  const raw = String(config.cron_expression || '').trim()
+  if (!raw) return ''
+  const fields = raw.split(/\s+/)
+  if (fields.length !== 5) return `必须是 5 段（分 时 日 月 周），当前只有 ${fields.length} 段`
+  if (!fields.every(field => CRON_FIELD.test(field))) return '只允许数字、* , - / 以及英文缩写'
+  return ''
+})
+
+/** 失焦时把多余空白收成一个空格，避免「0  3 * * *」这类看不出问题的写法。 */
+function normalizeCron() {
+  const raw = String(config.cron_expression || '').trim()
+  config.cron_expression = raw ? raw.split(/\s+/).join(' ') : ''
+}
 
 onMounted(() => {
   const source = props.initialConfig || {}
@@ -126,7 +146,15 @@ async function scanNow() {
       </div>
       <div class="cfg-field">
         <span class="cfg-label">定时扫描（cron 表达式）</span>
-        <input v-model="config.cron_expression" class="cfg-input" type="text" placeholder="留空关闭，例如 0 3 * * * 表示每天 03:00 全量补漏扫描一次">
+        <input
+          v-model="config.cron_expression"
+          class="cfg-input"
+          :class="{ 'is-invalid': cronError }"
+          type="text"
+          placeholder="留空关闭，例如 0 3 * * * 表示每天 03:00 全量补漏扫描一次"
+          @blur="normalizeCron"
+        >
+        <p v-if="cronError" class="cfg-error">{{ cronError }}</p>
       </div>
       <p class="cfg-tip">网络挂载目录（CloudDrive2 / rclone / SMB 等）请选择兼容模式。</p>
 
@@ -145,7 +173,12 @@ async function scanNow() {
       >全量扫描{{ config.overwrite ? '（覆盖重刮）' : '（仅补缺失）' }}</button>
       <div class="cfg-foot-right">
         <button class="cfg-btn ghost" @click="close">取消</button>
-        <button class="cfg-btn" @click="submit">保存</button>
+        <button
+          class="cfg-btn"
+          :disabled="!!cronError"
+          :title="cronError || '保存配置'"
+          @click="submit"
+        >保存</button>
       </div>
     </div>
   </div>
@@ -197,6 +230,8 @@ async function scanNow() {
 .cfg-input:focus, .cfg-select:focus, .cfg-textarea:focus {
   border-color: rgb(var(--v-theme-primary, 124, 92, 252));
 }
+.cfg-input.is-invalid { border-color: #E5484D; }
+.cfg-error { font-size: 11.5px; color: #E5484D; margin: 5px 0 0; }
 .cfg-tip {
   font-size: 11.5px; margin: -4px 0 0;
   color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .55));

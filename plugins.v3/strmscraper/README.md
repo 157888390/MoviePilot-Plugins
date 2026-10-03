@@ -1,24 +1,24 @@
 # STRM监控刮削（StrmScraper）· V3
 
-监控用户配置的目录，检测新出现的 `.strm` 文件，自动调用 MoviePilot **主程序刮削链**补齐元数据。
+监控用户配置的目录，检测新出现的 `.strm` 文件，自动调用 MoviePilot **主程序刮削链**补齐元数据。  
 V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / 电视剧单集」的识别与按需刮削能力。
 
 ## V3 迁移要点（v3.0.0 起）
 
 本次在保留既有能力（CloudDrive2 等挂载的存储解析、刮削记录、Vuetify 详情页）的基础上新增：
 
-| 项目 | V2 | V3 |
-|------|------|------|
-| 插件目录 | `plugins.v2/strmscraper` | `plugins.v3/strmscraper` |
-| 索引文件 | `package.v2.json` | `package.v3.json`（`system_version: ">=3.0.0"`） |
-| 插件版本 | `1.1.1` | `3.3.4`（主版本跃迁） |
-| 刮削入口 | `MediaChain().scrape_metadata()` | `ScrapingChain().scrape_metadata()` |
-| 日志 | `from app.log import logger` | `from app.sdk.logging import logger` |
-| 插件基类 | `from app.plugins import _PluginBase`（走 Compat 层） | `from app.sdk.plugin import _PluginBase` |
-| 数据结构 | `from app import schemas` → `schemas.FileItem` / `schemas.Response` | `from app.schemas.file import FileItem`、`from app.schemas.response import Response`（canonical 归属模块） |
-| 文件项 | `StorageChain().get_file_item()` | 先用 `StorageChain().get_file_item()` 按 local→已配置存储（CloudDrive2/alist/rclone）顺序解析，取不到时兜底手工构造 `FileItem`（参考 `libraryscraper` V3 写法） |
-| 并发 | 裸 `threading.Thread` | 主程序共享线程池 `app.runtime.thread.ThreadHelper` |
-| 旧索引 | 同名条目新增 `"v3": false`，避免 V3 回退加载旧合同实现 | — |
+| 项目   | V2                                                                  | V3                                                                                                                               |
+| ---- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 插件目录 | `plugins.v2/strmscraper`                                            | `plugins.v3/strmscraper`                                                                                                         |
+| 索引文件 | `package.v2.json`                                                   | `package.v3.json`（`system_version: ">=3.0.0"`）                                                                                   |
+| 插件版本 | `1.1.1`                                                             | `3.3.5`（主版本跃迁）                                                                                                                   |
+| 刮削入口 | `MediaChain().scrape_metadata()`                                    | `ScrapingChain().scrape_metadata()`                                                                                              |
+| 日志   | `from app.log import logger`                                        | `from app.sdk.logging import logger`                                                                                             |
+| 插件基类 | `from app.plugins import _PluginBase`（走 Compat 层）                   | `from app.sdk.plugin import _PluginBase`                                                                                         |
+| 数据结构 | `from app import schemas` → `schemas.FileItem` / `schemas.Response` | `from app.schemas.file import FileItem`、`from app.schemas.response import Response`（canonical 归属模块）                              |
+| 文件项  | `StorageChain().get_file_item()`                                    | 先用 `StorageChain().get_file_item()` 按 local→已配置存储（CloudDrive2/alist/rclone）顺序解析，取不到时兜底手工构造 `FileItem`（参考 `libraryscraper` V3 写法） |
+| 并发   | 裸 `threading.Thread`                                                | 主程序共享线程池 `app.runtime.thread.ThreadHelper`                                                                                       |
+| 旧索引  | 同名条目新增 `"v3": false`，避免 V3 回退加载旧合同实现                                | —                                                                                                                                |
 
 > **不要修改 `plugins.v2/` 下的旧实现。** `package.v2.json` 中同名条目已标记 `"v3": false`，V3 只加载 `plugins.v3`。
 
@@ -28,6 +28,11 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 - **详情页**：未构建联邦产物时给出最简运行状态提示
 
 ## 版本变更摘要
+
+### v3.3.5
+
+- **修复定时扫描服务一直注册失败**：`get_service()` 的 `trigger` 之前填的是 cron 字符串，宿主会把它原样当成 APScheduler 的触发器别名去查表，直接报 `No trigger by the name "0 4 * * *" was found`，界面上表现为「插件服务注册失败」、定时扫描从不执行。现改为 `CronTrigger.from_crontab()` 构造真实触发器（官方 FAQ 04 的写法），`0 4 * * *` 这类表达式可正常注册并显示下次运行时间。
+- **cron 表达式增加校验与提示**：新增 `normalize_cron()` 先按「五段 + 字符集」挡手误、再由 `CronTrigger.from_crontab()` 权威解析，留空或非法（如只写了 `0 4`）不再向宿主注册，只在日志给出 WARN，并自动收敛多余空白。配置页 cron 输入框同步做行内校验：段数不对或含非法字符时标红提示，非法时禁用「保存」。
 
 ### v3.3.4
 
@@ -76,10 +81,10 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 
 主程序刮削链对「目录」与「文件」的产出不同，按场景选择：
 
-| 目标 | `target` | 构造方式 | 产出 |
-|------|----------|----------|------|
-| 剧集根目录 / 电影目录 | `dir` | `FileItem(type="dir", path="<目录>/")`，路径必须以 `/` 结尾 | `tvshow.nfo` / `movie.nfo`、`poster`、`backdrop`、`logo`、`banner`、`thumb`、`season01-poster`、`Season 1/season.nfo` 及各单集 nfo |
-| 单个 `.strm` | `file` | `FileItem(type="file", extension="strm")` | 该单集/该版本的 `.nfo` 与单集图 |
+| 目标           | `target` | 构造方式                                              | 产出                                                                                                                      |
+| ------------ | -------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| 剧集根目录 / 电影目录 | `dir`    | `FileItem(type="dir", path="<目录>/")`，路径必须以 `/` 结尾 | `tvshow.nfo` / `movie.nfo`、`poster`、`backdrop`、`logo`、`banner`、`thumb`、`season01-poster`、`Season 1/season.nfo` 及各单集 nfo |
+| 单个 `.strm`   | `file`   | `FileItem(type="file", extension="strm")`         | 该单集/该版本的 `.nfo` 与单集图                                                                                                    |
 
 `.strm` 位于主程序 `settings.RMT_MEDIAEXT` 白名单内（`app/runtime/config.py`），因此**单文件刮削受支持**，可直接用于：
 
@@ -111,9 +116,9 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 
 未归入任何已知分类的媒体（含直接挂在监控根下的剧）统一计入 **未分类**，排在列表最后。该分组在二级分类里的 `path` 回落为分类目录本身，因此对它做 `scope=category` 扫描等价于扫整个分类目录。
 
-分类层可以**嵌套**：对已识别的分类目录再判一次，若其下仍构成分类层（如
-`<监控目录>/电视剧/日番/<剧名>/`），这一层即为**二级分类**。`/categories` 会把它们放进父分类的
-`children`（同样带总数 / 待刮数 / 电影数 / 电视剧数 / 音乐数），界面在选中「电影」「电视剧」类型时
+分类层可以**嵌套**：对已识别的分类目录再判一次，若其下仍构成分类层（如  
+`<监控目录>/电视剧/日番/<剧名>/`），这一层即为**二级分类**。`/categories` 会把它们放进父分类的  
+`children`（同样带总数 / 待刮数 / 电影数 / 电视剧数 / 音乐数），界面在选中「电影」「电视剧」类型时  
 以二级分类抽屉呈现；散装在分类目录下、没进任何二级分类的媒体归入该分类下的「未分类」子分组。
 
 ## 媒体识别规则
@@ -132,20 +137,20 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 
 前端用宿主注入的 `api` 调用，路径前缀 `plugin/StrmScraper`：
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/overview?refresh=false` | 媒体总数、电影/电视剧/音乐/多版本数量、刮削状态四计数 `status`（`scraped`/`failed`/`skipped`/`pending`）、监控目录、是否在监控，以及队列轻量摘要 `busy` / `queued`；`refresh=true` 绕过 60 秒清单缓存重扫 |
-| GET | `/items?refresh=false` | 媒体聚合清单。每条含条目级状态 `status` / `error_code` / `error_message`（取自 `scrape_state.json`，`.nfo` 只作兜底）与两个时间 `last_file_change`（文件 mtime）/ `last_scrape`（真实刮削时间）；文件明细（单集/版本）同样带 `status` / `error_code` |
-| GET | `/files?path=<目录>&season=<季号>` | 指定媒体的单集或版本文件明细（每个文件带 `status` / `error_code` / `error_message` 四态状态） |
-| GET | `/categories` | 按分类聚合的总数 / 待刮数 / 电影数 / 电视剧数 / 音乐数；每个分类的 `children` 为其二级分类的同名字段，空的「未分类」子分组会被剔除 |
-| GET | `/records?limit=200&success=true&type=dir&category=日番&since=2026-09-01&until=2026-09-26` | 最近刮削记录（时间 / 类型 / 标题 / 分类 / 结果 / 消息 / `error_code` / `exists` 目标是否仍存在）；`success` 只取成功/失败，`type` 只取 `dir`/`file`，`category` 只取该分类，`since`/`until` 为 `YYYY-MM-DD` 闭区间 |
-| GET | `/records/clear` | 清空刮削记录 |
-| GET | `/queue` | 队列快照：`running`（正在执行的目标，含 `kind`）、`queued`（前 50 条）、`queued_total`、`stats`（`done` / `failed` / `canceled` 累计）、`recent`（最近 20 条完成项）、`busy`。界面只轮询这一个接口 |
-| POST | `/scrape` | body：`{"paths": [...], "target": "dir"\|"file", "overwrite": true}`，`overwrite` 可省略（省略时用插件配置）；返回 `{"queued": n, "deduped": m}` |
-| POST | `/queue/cancel` | body：`{"mode": "all"\|"one", "target": "目录路径", "scope": "扫描范围"}`。`mode=all` 清空整个队列，`mode=one` 只取消匹配 `target`（含子树）或 `scope` 的项；正在执行的项不强行中断，只停止取后续项。返回 `{"canceled": n}` |
-| POST | `/retry_failed` | body：`{"category": "分类路径"}`（可省略）。读状态表把 `status=failed` 的目录批量重新入队，返回 `{"queued": n, "deduped": m}` |
-| GET | `/scan?overwrite=false&scope=all&paths=<目录1,目录2>` | 把一次扫描并入队列并立即返回。`scope` 四种：`all`=全部监控目录；`category`=只扫 `paths` 给出的分类目录（逗号分隔绝对路径，须在监控目录内）；`incremental`=只补新增与未刮的目录；`unscraped`=只刮状态非「已刮」的目录。`overwrite` 不传时跟随插件配置的「覆盖已有元数据」开关。重复的同类扫描只计一次（返回 `queued=0`） |
-| GET | `/strm_scan?overwrite=false` | 同上（等价 `scope=all`），apikey 认证（旧接口，保留兼容） |
+| 方法   | 路径                                                                                       | 说明                                                                                                                                                                                                    |
+| ---- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET  | `/overview?refresh=false`                                                                | 媒体总数、电影/电视剧/音乐/多版本数量、刮削状态四计数 `status`（`scraped`/`failed`/`skipped`/`pending`）、监控目录、是否在监控，以及队列轻量摘要 `busy` / `queued`；`refresh=true` 绕过 60 秒清单缓存重扫                                                      |
+| GET  | `/items?refresh=false`                                                                   | 媒体聚合清单。每条含条目级状态 `status` / `error_code` / `error_message`（取自 `scrape_state.json`，`.nfo` 只作兜底）与两个时间 `last_file_change`（文件 mtime）/ `last_scrape`（真实刮削时间）；文件明细（单集/版本）同样带 `status` / `error_code`         |
+| GET  | `/files?path=<目录>&season=<季号>`                                                           | 指定媒体的单集或版本文件明细（每个文件带 `status` / `error_code` / `error_message` 四态状态）                                                                                                                                  |
+| GET  | `/categories`                                                                            | 按分类聚合的总数 / 待刮数 / 电影数 / 电视剧数 / 音乐数；每个分类的 `children` 为其二级分类的同名字段，空的「未分类」子分组会被剔除                                                                                                                         |
+| GET  | `/records?limit=200&success=true&type=dir&category=日番&since=2026-09-01&until=2026-09-26` | 最近刮削记录（时间 / 类型 / 标题 / 分类 / 结果 / 消息 / `error_code` / `exists` 目标是否仍存在）；`success` 只取成功/失败，`type` 只取 `dir`/`file`，`category` 只取该分类，`since`/`until` 为 `YYYY-MM-DD` 闭区间                                    |
+| GET  | `/records/clear`                                                                         | 清空刮削记录                                                                                                                                                                                                |
+| GET  | `/queue`                                                                                 | 队列快照：`running`（正在执行的目标，含 `kind`）、`queued`（前 50 条）、`queued_total`、`stats`（`done` / `failed` / `canceled` 累计）、`recent`（最近 20 条完成项）、`busy`。界面只轮询这一个接口                                                    |
+| POST | `/scrape`                                                                                | body：`{"paths": [...], "target": "dir"\|"file", "overwrite": true}`，`overwrite` 可省略（省略时用插件配置）；返回 `{"queued": n, "deduped": m}`                                                                        |
+| POST | `/queue/cancel`                                                                          | body：`{"mode": "all"\|"one", "target": "目录路径", "scope": "扫描范围"}`。`mode=all` 清空整个队列，`mode=one` 只取消匹配 `target`（含子树）或 `scope` 的项；正在执行的项不强行中断，只停止取后续项。返回 `{"canceled": n}`                                |
+| POST | `/retry_failed`                                                                          | body：`{"category": "分类路径"}`（可省略）。读状态表把 `status=failed` 的目录批量重新入队，返回 `{"queued": n, "deduped": m}`                                                                                                     |
+| GET  | `/scan?overwrite=false&scope=all&paths=<目录1,目录2>`                                        | 把一次扫描并入队列并立即返回。`scope` 四种：`all`=全部监控目录；`category`=只扫 `paths` 给出的分类目录（逗号分隔绝对路径，须在监控目录内）；`incremental`=只补新增与未刮的目录；`unscraped`=只刮状态非「已刮」的目录。`overwrite` 不传时跟随插件配置的「覆盖已有元数据」开关。重复的同类扫描只计一次（返回 `queued=0`） |
+| GET  | `/strm_scan?overwrite=false`                                                             | 同上（等价 `scope=all`），apikey 认证（旧接口，保留兼容）                                                                                                                                                                |
 
 响应统一为主程序 REST 信封：`{"success": true, "message": "", "data": {}}`。
 
@@ -185,10 +190,11 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 
 插件**不注册主界面侧栏入口**（`get_sidebar_nav()` 恒返回空），全部界面收敛在插件中心的详情弹窗，只暴露两个远程模块：
 
-| 模块 | 文件 | 作用 |
-|------|------|------|
-| `./Page` | `src/components/Page.vue` | 详情页：统计/类型/状态筛选合并成一行可点击 chip（数字即筛选入口）、二级分类下拉（多选）+ 面包屑、关键词搜索、海报墙（四态状态圆点 + 失败红字）、内联详情（文件更新/上次刮削两行时间、季/集与多版本四态图标 + tooltip）、可展开队列面板（逐项取消/取消全部/重试失败项）、刮削记录页（状态/类型/分类/时间范围筛选） |
-| `./Config` | `src/components/Config.vue` | 插件配置弹窗（**必须有**：Vue 模式下宿主只渲染远程 `Config`，不会回退 Vuetify 表单） |
+| 模块         | 文件                          | 作用                                                                                                                                                                      |
+| ---------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `./Page`   | `src/components/Page.vue`   | 详情页：统计/类型/状态筛选合并成一行可点击 chip（数字即筛选入口）、二级分类下拉（多选）+ 面包屑、关键词搜索、海报墙（四态状态圆点 + 失败红字）、内联详情（文件更新/上次刮削两行时间、季/集与多版本四态图标 + tooltip）、可展开队列面板（逐项取消/取消全部/重试失败项）、刮削记录页（状态/类型/分类/时间范围筛选） |
+| `./Config` | `src/components/Config.vue` | 插件配置弹窗（**必须有**：Vue 模式下宿主只渲染远程 `Config`，不会回退 Vuetify 表单）                                                                                                                 |
+
 
 头部按钮只有四个：**设置 / 刷新 / 全量扫描（下拉）/ 关闭**。
 
@@ -223,7 +229,7 @@ npm install
 npm run build
 ```
 
-> 在本机 Git Bash 下 `npm run build` 可能因 shim 找不到 bash 而失败，可直接调用 vite：
+> 在本机 Git Bash 下 `npm run build` 可能因 shim 找不到 bash 而失败，可直接调用 vite：  
 > `node node_modules/vite/bin/vite.js build`，再手动清掉 `dist/assets/remoteEntry.js` 的尾部空白。
 
 产物文件名必须落在宿主的上传白名单 `__federation_*` / `_plugin-vue_export-helper-*` / `remoteEntry.js` 内 —— 当前全部符合。
@@ -244,7 +250,7 @@ npm run build
 
 10 分钟去重窗口 `DEDUP_TTL` **只作用于文件事件源**，避免一季多集落盘时整剧反复重刮。
 
-> **显式动作不受此窗口限制**：全量扫描与界面上的重刮走队列，队列本身按目标 key 去重，不再经过时间窗口。此前刚被事件刮过的目录会在 10 分钟内被窗口静默跳过，界面上表现为「点了全量刷新没反应」。
+> **显式动作不受此窗口限制**：全量扫描与界面上的重刮走队列，队列本身按目标 key 去重，不再经过时间窗口。此前刚被事件刮过的目录会在 10 分钟内被窗口静默跳过，界面上表现为「点了全量刷新没反应」。  
 > 去重表在条目数超过 `DEDUP_PRUNE_THRESHOLD = 128` 时淘汰已过期条目，不会随运行时长无限增长。
 
 「立即全量扫描一次」的 3 秒延迟由 `ThreadHelper` 线程池承担（不再用裸 `threading.Timer`），延迟结束后把一次 `scope=all` 扫描并入队列。
@@ -259,17 +265,17 @@ npm run build
 
 ## 配置项
 
-| 配置 | 说明 |
-|------|------|
-| 启用插件 | 开启目录实时监控 |
-| 立即全量扫描一次 | 对监控目录内所有 .strm 全量刮削一次 |
-| 覆盖已有刮削结果 | 对应 `scrape_metadata` 的 `overwrite` 参数。**关**则跳过已有元数据、只补缺失项；**开**则整目录重刮覆盖。同时是 `/scan` 不传 `overwrite` 时的默认值，也是配置页「全量扫描」按钮跟随的取值 |
-| 记录刮削历史 | 把每次刮削的结果写入插件数据目录并在界面展示 |
-| 监控模式 | 性能模式（inotify）/ 兼容模式（轮询） |
-| 监控目录 | 每行一个目录 |
-| 排除关键词 | 每行一个（正则），匹配的路径不刮削 |
-| 定时扫描（cron 表达式） | 留空关闭；配置后由宿主调度器（`get_service` 契约）到点把一次 `scope=all` 全量扫描并入队列，例如 `0 3 * * *` 表示每天 03:00 补漏扫描一次 |
+| 配置             | 说明                                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 启用插件           | 开启目录实时监控                                                                                                                    |
+| 立即全量扫描一次       | 对监控目录内所有 .strm 全量刮削一次                                                                                                       |
+| 覆盖已有刮削结果       | 对应 `scrape_metadata` 的 `overwrite` 参数。**关**则跳过已有元数据、只补缺失项；**开**则整目录重刮覆盖。同时是 `/scan` 不传 `overwrite` 时的默认值，也是配置页「全量扫描」按钮跟随的取值 |
+| 记录刮削历史         | 把每次刮削的结果写入插件数据目录并在界面展示                                                                                                      |
+| 监控模式           | 性能模式（inotify）/ 兼容模式（轮询）                                                                                                     |
+| 监控目录           | 每行一个目录                                                                                                                      |
+| 排除关键词          | 每行一个（正则），匹配的路径不刮削                                                                                                           |
+| 定时扫描（cron 表达式） | 留空关闭；配置后由宿主调度器（`get_service` 契约）到点把一次 `scope=all` 全量扫描并入队列，例如 `0 3 * * *` 表示每天 03:00 补漏扫描一次                                 |
 
-> 关于「覆盖已有刮削结果」：宿主的「文件已存在，跳过」**只对 `backdrop.jpg` 生效**，poster / fanart / clearart / logo / thumb / banner / disc / landscape 每次都会重新下载。
-> 实测：13 个媒体（10 电影 + 3 电视剧）重扫一次，下载 134 张图片，耗时 **4 分 35 秒**，其中约 88% 花在图片下载上。
+> 关于「覆盖已有刮削结果」：宿主的「文件已存在，跳过」**只对 `backdrop.jpg` 生效**，poster / fanart / clearart / logo / thumb / banner / disc / landscape 每次都会重新下载。  
+> 实测：13 个媒体（10 电影 + 3 电视剧）重扫一次，下载 134 张图片，耗时 **4 分 35 秒**，其中约 88% 花在图片下载上。  
 > 因此**日常维护建议关闭该开关**，只在图片损坏 / 想换图源时才开启；界面上的「全量扫描 → 覆盖重刮」等价于按次开启。
