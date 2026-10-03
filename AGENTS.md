@@ -48,6 +48,16 @@ MoviePilot-Plugins/
    必须同步改前端源码并重建 `dist/`**，只改 `get_form()` 不会出现在界面上。
    `lxmusicdownloader` 未附带前端源码，它的配置项只能通过
    `PUT /api/v1/plugin/<PluginID>` 或直接改配置写入。
+9. **`get_service()` 返回的 `trigger` 必须是 APScheduler 的 Trigger 实例**
+   （如 `CronTrigger.from_crontab("0 3 * * *")`）或 `cron`/`interval`/`date` 别名。
+   宿主 `app/scheduler/reconcile.py` 会把它原样透传给 `add_job()` 的第 2 个位置参数，
+   填 cron 字符串会被 APScheduler 当成触发器别名去查表，报
+   `No trigger by the name "0 3 * * *" was found` 并让宿主弹出「插件服务注册失败」。
+   周期服务的业务参数走 `func_kwargs`，`kwargs` 里的键会展开成 `add_job` 的关键字参数。
+10. **`DEV=true` 的实例不启动定时服务**（宿主 `app/scheduler/lifecycle.py` 里
+   `if config.dev: return`），`get_service()` 注册链路与 `/api/v1/dashboard/schedule`
+   在 dev 里恒为空。涉及定时服务的问题只能在正式实例复现，dev 侧用
+   「直接调用插件方法 + 本地 `BackgroundScheduler` 模拟宿主 `add_job`」验证。
 
 ## 4. 图标规则（重要）
 
