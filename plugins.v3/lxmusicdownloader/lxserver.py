@@ -8,6 +8,7 @@
 - ``GET  /api/user/auth/verify``            校验 token，可反查绑定的 username
 - ``POST /api/user/login``                  ``{username, password}`` -> ``{success, token}``
 - ``GET  /api/music/search``                ``name/source/type/page/pages/limit``，**返回裸数组**
+- ``GET  /api/music/albumSongs``            ``id/source`` -> 整张专辑曲目 + 发行日期（**仅 tx / wy 支持**）
 - ``POST /api/music/url``                   ``{songInfo, quality}`` -> ``{url, quality}``
 - ``GET  /api/music/download``              代理下载，``tag=1`` 注入 ID3，响应为二进制流
 - ``POST /api/music/cache/download``        服务端缓存下载
@@ -143,13 +144,15 @@ class LxServerClient:
             headers.update(extra)
         return headers
 
-    def _get(self, path: str, params: Optional[dict] = None, extra_headers: Optional[dict] = None) -> Any:
-        """发送带鉴权头的 GET 请求。"""
-        return self._request("GET", path, params=params, extra_headers=extra_headers)
+    def _get(self, path: str, params: Optional[dict] = None, extra_headers: Optional[dict] = None,
+             timeout: Optional[float] = None) -> Any:
+        """发送带鉴权头的 GET 请求。``timeout`` 可覆盖实例默认超时。"""
+        return self._request("GET", path, params=params, extra_headers=extra_headers, timeout=timeout)
 
-    def _post(self, path: str, body: Optional[dict] = None, extra_headers: Optional[dict] = None) -> Any:
+    def _post(self, path: str, body: Optional[dict] = None, extra_headers: Optional[dict] = None,
+              timeout: Optional[float] = None) -> Any:
         """发送带鉴权头的 POST 请求，body 以 JSON 发送。"""
-        return self._request("POST", path, json_body=body, extra_headers=extra_headers)
+        return self._request("POST", path, json_body=body, extra_headers=extra_headers, timeout=timeout)
 
     def _request(
         self,
@@ -158,16 +161,22 @@ class LxServerClient:
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
         extra_headers: Optional[dict] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
-        """发起请求并按状态码给出可读错误。"""
+        """发起请求并按状态码给出可读错误。
+
+        ``timeout`` 为请求级覆盖：识别链路上的调用必须用短超时，因为它跑在同步派发的
+        链式事件里，会直接阻塞 MoviePilot 的识别线程。
+        """
         url = self.host + path
+        effective = self.timeout if timeout is None else timeout
         try:
             if method == "GET":
                 response = httpx2.get(
                     url,
                     params=params,
                     headers=self._headers(extra_headers),
-                    timeout=self.timeout,
+                    timeout=effective,
                     follow_redirects=True,
                 )
             else:
@@ -175,7 +184,7 @@ class LxServerClient:
                     url,
                     json=json_body,
                     headers=self._headers(extra_headers),
-                    timeout=self.timeout,
+                    timeout=effective,
                     follow_redirects=True,
                 )
         except Exception as err:  # noqa: BLE001
@@ -253,11 +262,15 @@ class LxServerClient:
         page: int = 1,
         pages: int = 1,
         limit: int = 20,
+        timeout: Optional[float] = None,
     ) -> list[dict]:
         """搜索歌曲。该接口返回裸数组，不是 {list: [...]}。
 
         服务端的 song 分支每页固定 20 条，``limit`` 对它不生效；要拿到更多候选
         必须加大 ``pages``。这里按需反推页数，再在本地截断到 limit。
+
+        注意 **``singer`` 参数在服务端会被完全忽略**（只把 ``name`` 传给
+        ``musicSearch.search``），所以要按歌手收窄结果必须自己拼进 ``name``。
         """
         if search_type == "song" and limit > 0:
             pages = max(int(pages), -(-limit // 20))
@@ -272,6 +285,7 @@ class LxServerClient:
                 "pages": pages,
                 "limit": limit,
             },
+            timeout=timeout,
         )
 
         items: list[dict] = []
@@ -303,6 +317,25 @@ class LxServerClient:
         if not isinstance(data, dict):
             raise LxServerError(f"直链解析响应异常：{str(data)[:200]}")
         return data
+
+    def album_songs(self, album_id: str, source: str = "wy",
+                    timeout: Optional[float] = None) -> Optional[dict]:
+        """取整张专辑的曲目表，返回 ``{list, total, name, publishTime, source}``。
+
+        这是**服务端内置 musicSdk** 提供的接口，与自定义音源脚本无关，所以即使
+        直链解析不可用也能取到。但只有 tx / wy 实现了 ``extendDetail.getAlbumSongs``，
+        其余平台会直接 500 —— 这里统一返回 None，由调用方走降级路径。
+        """
+        try:
+            data = self._get(
+                "/api/music/albumSongs",
+                params={"id": album_id, "source": source},
+                timeout=timeout,
+            )
+        except LxServerError as err:
+            logger.debug(f"专辑曲目查询失败（{source}:{album_id}）：{err}")
+            return None
+        return data if isinstance(data, dict) else None
 
     # ------------------------------------------------------------------ #
     #                              歌单                                    #

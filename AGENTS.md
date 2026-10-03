@@ -42,6 +42,12 @@ MoviePilot-Plugins/
 6. Vue 联邦产物放 `dist/assets/`，**文件名必须落在 `__federation_*` /
    `_plugin-vue_export-helper-*` / `remoteEntry.js` 白名单内**。
 7. 插件运行数据写入插件数据目录，不得写回源码目录。
+8. **有 `dist/assets/remoteEntry.js` 的插件走 Vue 渲染模式，配置界面由
+   `__federation_expose_Config-*.js` 渲染，后端 `get_form()` 的 `conf` schema 会被
+   忽略**（宿主前端只在 `render_mode === "vuetify"` 时读 `conf`）。所以**新增配置项
+   必须同步改前端源码并重建 `dist/`**，只改 `get_form()` 不会出现在界面上。
+   `lxmusicdownloader` 未附带前端源码，它的配置项只能通过
+   `PUT /api/v1/plugin/<PluginID>` 或直接改配置写入。
 
 ## 4. 图标规则（重要）
 

@@ -93,12 +93,13 @@ class LxDownloader:
         base_name: str,
         quality: str,
         artists: Optional[list[str]] = None,
+        album_type: Optional[str] = None,
     ) -> tuple[Path, int]:
         """把已打开的流式响应写盘，返回 (最终路径, 字节数)。
 
         先读第一个分块用于嗅探格式再决定扩展名，避免写完再改后缀导致返回一个
         实际并不存在的路径。``artists`` 给出 2 个及以上歌手时会在落盘后把
-        artist 标签改写成多值。
+        artist 标签改写成多值；``album_type`` 给出发行类型时写入 ``releasetype``。
         """
         base_name = self.sanitize(base_name)
         dest_dir = Path(dest_dir)
@@ -128,6 +129,8 @@ class LxDownloader:
             # 容器格式，所以 .part 这种无扩展名的临时文件也能正常写入。
             if artists:
                 self.apply_artists(tmp, artists)
+            if album_type:
+                self.apply_album_type(tmp, album_type)
             tmp.replace(final)
         finally:
             if tmp.exists():
@@ -162,6 +165,70 @@ class LxDownloader:
             return True
         except Exception as err:  # noqa: BLE001
             logger.debug(f"写入多歌手标签失败：{path} - {err}")
+            return False
+
+    @staticmethod
+    def apply_album_type(path: Path, album_type: str) -> bool:
+        """把发行类型写进音频标签（``releasetype``），让宿主整理时直接读得到。
+
+        背景：宿主整理音乐时，只要本地标签的 title / artist / album 齐全就**不再**
+        向在线来源确认身份（``app/chain/transfer/music.py`` 的 ``_local_music_context``），
+        于是专辑类型只可能来自本地标签；而宿主自己写标签时并不写发行类型
+        （``app/application/audio.py`` 的 ``_tag_values`` 里没有 album_type 这一项）。
+        下载落盘时补上这一笔，整理就能按 Album / EP / Single 正确分类。
+
+        宿主读标签走 ``easy=False``（``app/application/audio.py`` 的 ``_readable_tags``），
+        所以这里必须按**容器原生键**写入，不能指望 ``EasyXXX`` 的键名映射：
+
+        ======================  ==========================================
+        Vorbis（FLAC/Ogg/Opus）  ``releasetype``
+        ID3（MP3 等）            ``TXXX:releasetype``
+        MP4（M4A/AAC）           ``----:com.apple.iTunes:RELEASETYPE``
+        APEv2 / ASF              ``releasetype``
+        ======================  ==========================================
+
+        写标签是锦上添花：任何异常都只记 debug 并返回 False，绝不影响下载结果。
+        """
+        value = str(album_type or "").strip()
+        if not value:
+            return False
+        try:
+            from mutagen import File as MutagenFile
+            from mutagen.apev2 import APEv2
+            from mutagen.asf import ASFTags
+            from mutagen.id3 import ID3, TXXX
+            from mutagen.mp4 import MP4Tags
+        except ImportError:  # 运行环境没有 mutagen（理论上 MoviePilot 自带）
+            logger.debug("运行环境缺少 mutagen，跳过发行类型标签写入")
+            return False
+
+        try:
+            audio = MutagenFile(str(path), easy=False)
+            if audio is None:
+                logger.debug(f"无法识别音频容器，跳过发行类型标签写入：{path}")
+                return False
+            tags = getattr(audio, "tags", None)
+            if tags is None:
+                audio.add_tags()
+                tags = audio.tags
+
+            if isinstance(tags, ID3):
+                tags.delall("TXXX:releasetype")
+                tags.add(TXXX(encoding=3, desc="releasetype", text=[value]))
+            elif isinstance(tags, MP4Tags):
+                tags["----:com.apple.iTunes:RELEASETYPE"] = [value.encode("utf-8")]
+            elif isinstance(tags, APEv2):
+                tags["releasetype"] = value
+            elif isinstance(tags, ASFTags):
+                tags["releasetype"] = value
+            else:
+                # Vorbis comment（FLAC / Ogg Vorbis / Ogg Opus）就是同名键
+                tags["releasetype"] = [value]
+            audio.save()
+            logger.info(f"已写入发行类型标签：{Path(path).name} -> releasetype={value}")
+            return True
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"写入发行类型标签失败：{path} - {err}")
             return False
 
     def save_cover(self, response, song_path: Path) -> Optional[Path]:

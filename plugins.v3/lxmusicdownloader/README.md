@@ -14,6 +14,7 @@ MoviePilot-Plugins/
 │       ├── __init__.py             # 主类 LxMusicDownloader，必须在 __init__.py
 │       ├── lxserver.py             # LX Sync Server API 客户端
 │       ├── downloader.py           # 落盘：格式嗅探、文件名清洗、原子写入
+│       ├── recognizer.py           # 把 LX 结果翻译成宿主的音乐识别回写负载
 │       ├── src/                    # Vue 前端源码（侧栏工作台 / 设置 / 详情）
 │       ├── dist/                   # vite 联邦构建产物（随插件附带，勿手改）
 │       ├── vite.config.js          # 联邦配置（exposes ./AppPage ./Page ./Config）
@@ -227,10 +228,13 @@ SDK 内置重试 5 次后直接 `reject(new Error('搜索失败'))`，与账号�
 | `playlist_concurrency` | 歌单整单下载并发（1-8，默认 3） |
 | `subdir_by_artist` | 是否按歌手建立子目录（仅单曲下载路径生效） |
 | `save_cover` | 是否额外保存封面图 |
-| `embed_tag` | 下载时带 `tag=1`，由服务端注入 ID3 标签（封面/标题/艺术家/专辑），不改变音频本体 |
+| `embed_tag` | 下载时带 `tag=1`，由服务端注入 ID3 标签（封面/标题/艺术家/专辑），不改变音频本体。插件另外按专辑曲目数补写发行类型标签 `releasetype`，详见「发行类型标签」 |
 | `embed_lyric` | 额外带 `lyric=1`，把歌词写入 `USLT` 帧；需 `embed_tag` 同时开启。建议开启，失败会自动降级 |
 | `split_artists` | 把「许嵩、何曼婷」这类拼接歌手拆成**多值**写进 artist 标签（默认开启）。详见「多歌手标签」 |
 | `use_server_cache` | 改为提交服务端缓存任务，而不是下载到本地 |
+| `recognize_enabled` | 开启音乐识别：注册为宿主的音乐数据源（`get_media_source()` / `get_module()`），并保留 `MusicMediaRecognize` 链式事件兜底 |
+| `recognize_source` | 识别用平台，默认 `wy`；只有 `tx` / `wy` 实现了专辑曲目接口 |
+| `recognize_timeout` | 单次识别请求超时秒数（1-30，默认 8）。识别是同步派发的，超时必须短 |
 
 ### 多歌手标签
 
@@ -250,6 +254,38 @@ SDK 内置重试 5 次后直接 `reject(new Error('搜索失败'))`，与账号�
 因此插件在落盘后、rename 之前用 mutagen 把 artist 改写成多值（`.part` 也能按内容识别容器格式）。
 只有 2 个及以上歌手才动文件，失败静默降级、不影响下载。分隔符只取 `、,，;；`——
 故意不含 `/` 与 `&`，否则 `AC/DC`、`Simon & Garfunkel` 会被误拆。
+
+### 发行类型标签
+
+下载的歌带着完整标签（title / artist / album）时，MoviePilot 整理会走 `_local_music_context`
+的快速通道——**只要本地标签齐全就不再去在线来源确认身份**。于是分类策略唯一的专辑类型来源
+就是本地标签；而宿主自己写标签时并不写发行类型（`app/application/audio.py` 的 `_tag_values`
+里没有 `album_type`）。两者叠加的结果是：歌下下来了，整理时却落进「未分类」。
+
+插件在落盘前补上这一笔：按专辑曲目数推断发行类型，写进 `releasetype` 标签。
+
+| 专辑曲目数 | 写入的发行类型 |
+| --- | --- |
+| 1 | `Single` |
+| 2-6 | `EP` |
+| 7 及以上 | `Album` |
+
+几条刻意的取舍：
+
+- 这个行为挂在 `embed_tag` 下一起生效：关掉标签注入时文件本来就不带 title / artist / album，
+  整理必然走在线识别通道，此时补写 `releasetype` 没有意义，也白搭一次查询。
+- **取不到曲目数就不写**，而不是按 `Album` 兜底。留空只是维持「未分类」的现状，写错却会把
+  单曲 / EP 导进专辑目录。
+- 识别平台与下载平台分开时（默认下载 `kw`、识别 `wy`），本平台没有专辑曲目接口就改用识别
+  平台按「歌手 + 歌名」重定位**高分候选**（低于 `MIN_SCORE` 不认），避免把同名翻唱的曲目数
+  当成事实。
+- 宿主读标签走 `easy=False`，所以按容器原生键写入：Vorbis（FLAC / Ogg / Opus）用 `releasetype`，
+  ID3 用 `TXXX:releasetype`，MP4 用 `----:com.apple.iTunes:RELEASETYPE`，APEv2 / ASF 用 `releasetype`
+  —— 都能被宿主的 `_readable_tags()` 归一成同一个键。
+- 与多歌手标签一样在 **rename 之前**写入，任何异常只记 debug 并降级，不影响下载结果。
+
+> 顺带说明：`kw` / `kg` / `mg` 上游没有实现 `getAlbumSongs`，直接调用会 500，所以走的是
+> 「识别平台重新搜索定位」这条降级路径；把 `recognize_source` 设为 `tx` 或 `wy` 才能拿到曲目数。
 
 ## 实现注意
 

@@ -3,13 +3,14 @@
     "name": "LX 音源下载",
     "description": "调用自建 LX Sync Server，搜索歌曲、浏览歌单并下载到自定义目录。",
     "labels": "音乐,下载,歌单,LX音源",
-    "version": "3.2.1",
+    "version": "3.3.0",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/lxmusicdownloader.png",
     "author": "157888390",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.3",
     "history": {
+      "v3.3.0": "下载落盘时写入发行类型标签，修正整理分类",
       "v3.2.1": "接入 LX Sync Server；支持搜索/歌单/下载与远程命令"
     }
   },

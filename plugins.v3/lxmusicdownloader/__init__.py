@@ -7,6 +7,10 @@
 
 插件不再在本地运行洛雪自定义源 JavaScript，音源能力由服务端提供，
 因此运行环境不需要 Node.js。
+
+另可选开启「音乐识别回写」：注册 ``ChainEventType.MusicMediaRecognize`` 链式事件，
+在原生识别拿不到远端身份时用 LX 的解析结果补齐身份与专辑级事实（专辑类型、曲序、
+发行日期），从而让本体的自动分类与重命名模板生效。详细约束见 ``recognizer.py``。
 """
 
 from __future__ import annotations
@@ -20,13 +24,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body
 
-from app.schemas.types import EventType, MessageType
+from app.schemas.types import ChainEventType, EventType, MediaSource, MediaType, MessageType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
+from app.sdk.media import normalize_media_source
 from app.sdk.plugin import _PluginBase
 
 from .downloader import LxDownloader, split_artists
 from .lxserver import SUPPORTED_SOURCES, LxServerClient, LxServerError
+from .recognizer import ALBUM_SONG_SOURCES, MEDIA_SOURCE, LxMusicRecognizer
 
 # 单次搜索缓存的结果数，供远程命令按序号下载
 MAX_CANDIDATES = 10
@@ -61,7 +67,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.2.1"
+    plugin_version = "3.3.0"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -70,8 +76,12 @@ class LxMusicDownloader(_PluginBase):
 
     _enabled = False
     _sidebar_enabled = True          # 是否在主界面左侧导航栏显示入口
+    _recognize_enabled = False       # 是否启用音乐识别（链式事件回写 + 注册为宿主数据源）
     _client: Optional[LxServerClient] = None
     _lock: Optional[threading.Lock] = None
+    # 识别器持有命中缓存，必须按运行实例隔离，所以类属性保持 None，
+    # 保证首次 init_plugin 一定落到实例属性上（V3 要求实例间不共享可变状态）
+    _recognizer: Optional[LxMusicRecognizer] = None
     # 会话 -> 最近一次搜索结果，供 /lx_download <序号> 使用。
     # 类属性保持 None：这样首次 init_plugin 一定会落到实例属性上，
     # 避免虚拟分身之间共享同一个可变 dict（V3 要求按运行实例隔离状态）。
@@ -100,6 +110,16 @@ class LxMusicDownloader(_PluginBase):
         self._embed_lyric = bool(config.get("embed_lyric"))
         self._split_artists = bool(config.get("split_artists", True))
         self._sidebar_enabled = bool(config.get("sidebar_enabled", True))
+        self._recognize_enabled = bool(config.get("recognize_enabled"))
+        # 识别平台与下载平台分开配置：专辑曲目接口只有 tx / wy 实现，
+        # 而默认下载源是 kw，两者混用会让曲序和发行日期永远取不到
+        self._recognize_source = str(config.get("recognize_source") or "wy").strip().lower() or "wy"
+        try:
+            self._recognize_timeout = max(
+                1.0, min(float(config.get("recognize_timeout") or 8), 30.0)
+            )
+        except (TypeError, ValueError):
+            self._recognize_timeout = 8.0
         try:
             self._max_results = max(1, min(int(config.get("max_results") or MAX_CANDIDATES), 50))
         except (TypeError, ValueError):
@@ -118,6 +138,13 @@ class LxMusicDownloader(_PluginBase):
         # 配置变化后必须丢弃旧客户端，否则会继续用上一份凭据
         self._client = None
         self._downloader = LxDownloader()
+        # 识别器一并重建，丢弃上一份命中缓存（换平台后旧命中不可复用）
+        self._recognizer = LxMusicRecognizer(
+            client_factory=self.get_client,
+            source=self._recognize_source,
+            limit=self._max_results,
+            timeout=self._recognize_timeout,
+        )
 
         if self._enabled:
             try:
@@ -130,10 +157,20 @@ class LxMusicDownloader(_PluginBase):
         return bool(self._enabled)
 
     def stop_service(self) -> None:
-        """释放后台资源，可重复调用。"""
+        """释放后台资源，可重复调用。
+
+        这里**故意不调用** ``eventmanager.disable_event_handler``：宿主
+        ``PluginLifecycle`` 会在停止时按"处理器类"统一禁用、重新启用时按类恢复，
+        而手工禁用记的是"处理器标识"，两份账本不通 —— 手工关掉之后类级恢复清不掉
+        这个标识，表现为热重载后事件静默不派发。链式事件处理器的生效开关统一由
+        ``get_state()``（宿主据此决定是否启用本类的 handler）与函数体内的配置判断控制。
+        """
         self._enabled = False
         self._client = None
         self._last_results = {}
+        if self._recognizer:
+            self._recognizer.clear()
+        self._recognizer = None
 
     # ------------------------------------------------------------------ #
     #                            远程命令                                  #
@@ -383,6 +420,9 @@ class LxMusicDownloader(_PluginBase):
         # 「许嵩、何曼婷」这种拼接串必须拆成多值写进标签，否则 MoviePilot 会当成
         # 一个整体艺术家，与 MusicBrainz 的候选求不到交集，识别失败导致整理被拒。
         artists = split_artists(song.get("singer")) if self._split_artists else []
+        # 发行类型也趁落盘前写进标签：本地标签齐全时整理不再向在线来源确认身份，
+        # 专辑类型只可能来自标签，缺了它就只能落进「未分类」。
+        album_type = self._album_type_for(song)
 
         with client.open_download(
             play_url, base_name, song, embed_tag=self._embed_tag, embed_lyric=self._embed_lyric
@@ -391,7 +431,9 @@ class LxMusicDownloader(_PluginBase):
             if response.status_code >= 400:
                 detail = self._read_error_body(response)
                 raise LxServerError(f"代理下载失败：HTTP {response.status_code} {detail}")
-            saved, size = self._downloader.save_stream(response, target_dir, base_name, quality, artists)
+            saved, size = self._downloader.save_stream(
+                response, target_dir, base_name, quality, artists, album_type
+            )
 
         if size < 4096:
             saved.unlink(missing_ok=True)
@@ -410,6 +452,20 @@ class LxMusicDownloader(_PluginBase):
                 logger.warn(f"封面下载失败：{err}")
 
         return "\n".join(lines)
+
+    def _album_type_for(self, song: dict) -> Optional[str]:
+        """推断本次下载歌曲的发行类型；不需要时返回 None。
+
+        挂在 ``embed_tag`` 下而不是单独做一个开关：发行类型是"注入标签"的一部分，
+        而关掉 ``embed_tag`` 时文件本来就不带 title / artist / album，整理必然走在线
+        识别通道，此时补写 releasetype 既没用也白搭一次查询。
+
+        复用 ``_recognizer`` 的实例缓存：整单下载同一张专辑时只查一次。
+        取不到确凿曲目数时返回 None（不写标签），详见 ``recognizer.album_type_for``。
+        """
+        if not self._embed_tag or self._recognizer is None:
+            return None
+        return self._recognizer.album_type_for(song)
 
     @staticmethod
     def _read_error_body(response) -> str:
@@ -664,6 +720,182 @@ class LxMusicDownloader(_PluginBase):
         return None
 
     # ------------------------------------------------------------------ #
+    #                          音乐识别回写                                #
+    # ------------------------------------------------------------------ #
+    @eventmanager.register(ChainEventType.MusicMediaRecognize)
+    def handle_music_media_recognize(self, event: Event) -> None:
+        """用 LX 服务端的解析结果补齐本体的音乐识别身份。
+
+        触发时机：原生识别（标签 / 文件名 / 目录名 + 在线源）没能给出带远端身份的
+        候选时，宿主广播 ``music.media.recognize``，把已知要素交给插件去匹配。
+        插件回写了带身份的结果后宿主会短路后续识别步骤，所以不回写就等于"没识别出来"。
+
+        ⚠️ 两条实测约束，改动前务必先读：
+
+        1. **回写的事实必须与本地证据一致。** 否则 ``app/chain/media/path.py`` 的
+           ``_music_info_matches_text_evidence`` 会把整条结果丢弃（只留一行 warning，
+           表现为"插件明明返回了却没生效"）。所以 ``recognizer`` 里对 title / artists /
+           year / album 一律回显载荷中的本地值。
+        2. **handler 是同步派发的**（``dispatch_chain`` → ``invoke_sync``），会直接阻塞
+           识别线程。所以网络请求全部带短超时，并靠识别器内的 TTL 缓存压掉重复查询。
+
+        处理器返回值不被使用，回写方式就是改 ``event.event_data`` 本身——dispatcher
+        拿到的是同一个 dict 对象（``Event.__init__`` 直接持有入参引用）。
+        """
+        if not (self._enabled and self._recognize_enabled):
+            return
+        recognizer = self._recognizer
+        if recognizer is None:
+            return
+        payload = event.event_data
+        if not isinstance(payload, dict):
+            return
+
+        info = recognizer.recognize(payload)
+        if not info:
+            return
+        payload["mediainfo"] = info
+
+    # ------------------------------------------------------------------ #
+    #                      音乐数据源注册（模块通道）                        #
+    # ------------------------------------------------------------------ #
+    # 与上面的链式事件是两条独立通道，共用 ``recognizer`` 里的同一份匹配逻辑：
+    #   链式事件 —— 宿主原生识别拿不到远端身份后才反问插件（我们是被动的兜底）；
+    #   模块通道 —— 插件注册成宿主的一等数据源，用户在来源选择器里选中它就直接被调用。
+    # 官方文档见 docs/faq/19-register-media-source.md。
+    def get_media_source(self) -> list[dict[str, Any]]:
+        """向宿主声明 lxmusic 来源，使其出现在前端的来源选择器里。
+
+        ``media_types`` 必须含 ``MediaType.MUSIC``，宿主前端据此把它放进音乐类选项。
+        宿主只在插件启用时才收集（``projection.media_sources`` 会先查 ``get_state()``），
+        停用后来源自动撤销，但历史数据保留原有 ``media_source`` / ``media_id``。
+        """
+        if not self._recognize_enabled:
+            return []
+        return [
+            {
+                "name": "LX 音乐",
+                "media_source": MEDIA_SOURCE,
+                "media_types": [MediaType.MUSIC],
+            }
+        ]
+
+    def get_module(self) -> dict[str, Any]:
+        """把识别能力注册进宿主的模块调度器。
+
+        调度顺序是「先插件、返回非空即短路」（``ModuleInvocationDispatcher._dispatch``），
+        所以每个方法都必须先确认 ``media_source`` 是本插件来源，不匹配一律返回 None，
+        否则会拦截其它来源的请求。
+
+        ``async_recognize_media`` 与同步版本指向同一个函数：调度器对同步函数会自动
+        放进线程池执行（``dispatcher._async_call``），因此不需要两份实现。
+        音乐域的通用端口 ``MusicMetadataSourceChain`` 认的就是这几个方法名。
+        """
+        if not (self._enabled and self._recognize_enabled):
+            return {}
+        return {
+            "recognize_media": self.recognize_media,
+            "async_recognize_media": self.recognize_media,
+            "search_music": self.search_music,
+            "music_album": self.music_album,
+        }
+
+    def _is_lx_source(self, media_source: Any) -> bool:
+        """判断请求来源是否为本插件来源（不匹配时调用方必须原样返回 None / 空列表）。"""
+        normalized = normalize_media_source(media_source)
+        return normalized is not None and normalized.value == MEDIA_SOURCE
+
+    def _music_payload(self, meta: Any, music_type: Any) -> dict[str, Any]:
+        """把宿主的 ``MetaMusic`` 归一成与链式事件**完全相同**的要素载荷。
+
+        两条通道共用 ``recognizer``，载荷形状必须一致，否则同一首歌会因通道不同
+        得出不同结果。字段清单对齐 ``_recognition._media_recognize_plugin_payload``。
+        """
+        return {
+            "title": getattr(meta, "title", None),
+            "artists": list(getattr(meta, "artists", None) or []),
+            "album": getattr(meta, "album", None),
+            "year": getattr(meta, "year", None),
+            "isrc": getattr(meta, "isrc", None),
+            "music_type": music_type or getattr(meta, "music_type", None) or "recording",
+        }
+
+    def recognize_media(
+        self,
+        meta: Any = None,
+        mtype: Any = None,
+        media_source: Any = None,
+        media_id: Optional[str] = None,
+        cache: bool = True,
+        music_type: Any = None,
+        **kwargs: Any,
+    ) -> Optional[dict]:
+        """按身份或标题要素识别一首歌。
+
+        带 ``media_id`` 时优先走身份索引回放（搜索候选被选中、重新识别、手动刮削
+        都走这条）；没有身份时退回按要素打分匹配，与链式事件通道共用同一份逻辑。
+        """
+        if not self._is_lx_source(media_source):
+            return None
+        recognizer = self._recognizer
+        if recognizer is None:
+            return None
+
+        payload = self._music_payload(meta, music_type)
+        if media_id:
+            return recognizer.recognize_by_id(str(media_id), payload)
+        if not payload.get("title"):
+            return None
+        return recognizer.recognize(payload)
+
+    def search_music(
+        self,
+        meta: Any = None,
+        limit: int = 20,
+        media_source: Any = None,
+        **kwargs: Any,
+    ) -> list[dict]:
+        """在统一媒体搜索里返回本来源的候选列表。
+
+        宿主按 ``ORDERED_LIST_MERGE`` 聚合，多个来源的候选合并成一份；返回的每条
+        都必须带上本来源的 ``media_source`` + ``media_id``，否则会被来源链过滤掉。
+        """
+        if not self._is_lx_source(media_source):
+            return []
+        recognizer = self._recognizer
+        if recognizer is None:
+            return []
+
+        payload = self._music_payload(meta, None)
+        if not payload.get("title"):
+            return []
+        try:
+            return recognizer.search_candidates(payload, limit)
+        except LxServerError as err:
+            logger.warn(f"LX 搜索失败：{err}")
+            return []
+        except Exception as err:  # noqa: BLE001  搜索失败不能让整个搜索接口 500
+            logger.warn(f"LX 搜索异常：{err}")
+            return []
+
+    def music_album(self, media_source: Any = None, media_id: Optional[str] = None,
+                    **kwargs: Any) -> Optional[dict]:
+        """按专辑 ``media_id`` 返回专辑详情（含曲目表）。
+
+        专辑级身份**不依赖身份索引**：曲目接口直接用 albumId 查，重启后依然可用。
+        """
+        if not self._is_lx_source(media_source):
+            return None
+        recognizer = self._recognizer
+        if recognizer is None or not media_id:
+            return None
+        try:
+            return recognizer.album_detail(str(media_id))
+        except LxServerError as err:
+            logger.debug(f"LX 专辑详情查询失败：{err}")
+            return None
+
+    # ------------------------------------------------------------------ #
     #                            定时任务                                  #
     # ------------------------------------------------------------------ #
     def get_service(self) -> list[dict]:
@@ -727,6 +959,15 @@ class LxMusicDownloader(_PluginBase):
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
         """返回配置页面和默认配置。"""
         source_items = [{"title": label, "value": key} for key, label in SUPPORTED_SOURCES.items()]
+        # 识别平台单独排序：只有 tx / wy 实现了专辑曲目接口，能顺带拿到曲序与发行日期，
+        # 其余平台只能确认歌曲身份，因此把可用的排在前面并标注出来
+        recognize_items = [
+            {"title": f"{label}（可读专辑曲目）", "value": key}
+            for key, label in SUPPORTED_SOURCES.items() if key in ALBUM_SONG_SOURCES
+        ] + [
+            {"title": label, "value": key}
+            for key, label in SUPPORTED_SOURCES.items() if key not in ALBUM_SONG_SOURCES
+        ]
         quality_items = [
             {"title": "128k", "value": "128k"},
             {"title": "320k", "value": "320k"},
@@ -889,6 +1130,53 @@ class LxMusicDownloader(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
+                                        "props": {
+                                            "model": "recognize_enabled",
+                                            "label": "音乐识别（注册为数据源）",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "recognize_source",
+                                            "label": "识别平台",
+                                            "items": recognize_items,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "recognize_timeout",
+                                            "label": "识别超时（秒）",
+                                            "type": "number",
+                                            "placeholder": "1-30，默认 8",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
                                         "props": {"model": "subdir_by_artist", "label": "按歌手分目录"},
                                     }
                                 ],
@@ -979,6 +1267,9 @@ class LxMusicDownloader(_PluginBase):
             "use_server_cache": False,
             "sidebar_enabled": True,
             "split_artists": True,
+            "recognize_enabled": False,
+            "recognize_source": "wy",
+            "recognize_timeout": 8,
         }
 
     def get_page(self) -> Optional[List[dict]]:
