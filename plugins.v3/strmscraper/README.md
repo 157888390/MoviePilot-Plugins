@@ -11,7 +11,7 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 | ---- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | 插件目录 | `plugins.v2/strmscraper`                                            | `plugins.v3/strmscraper`                                                                                                         |
 | 索引文件 | `package.v2.json`                                                   | `package.v3.json`（`system_version: ">=3.0.0"`）                                                                                   |
-| 插件版本 | `1.1.1`                                                             | `3.3.5`（主版本跃迁）                                                                                                                   |
+| 插件版本 | `1.1.1`                                                             | `3.3.6`（主版本跃迁）                                                                                                                   |
 | 刮削入口 | `MediaChain().scrape_metadata()`                                    | `ScrapingChain().scrape_metadata()`                                                                                              |
 | 日志   | `from app.log import logger`                                        | `from app.sdk.logging import logger`                                                                                             |
 | 插件基类 | `from app.plugins import _PluginBase`（走 Compat 层）                   | `from app.sdk.plugin import _PluginBase`                                                                                         |
@@ -28,6 +28,12 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 - **详情页**：未构建联邦产物时给出最简运行状态提示
 
 ## 版本变更摘要
+
+### v3.3.6
+
+- **手动刮削改为默认覆盖**：界面上「整剧 / 整目录重新刮削」「刮削」「刮削选中」四个按钮现在一律带 `overwrite=true`，与宿主原生手动刮削（`api/endpoints/media.py` 恒 `overwrite=True`）语义一致 —— 点一次就把目标范围内已存在的 NFO 与图片重下一遍，不必先去配置页打开开关。
+- **`/scrape` 默认值随之改为 `true`**：不传 `overwrite` 时按覆盖处理，只有显式传 `false` 才是「仅补缺失」。
+- **「覆盖已有元数据」开关收窄职责**：现在只决定 `/scan` 不传 `overwrite` 时的默认值、`/retry_failed` 与外部脚本未显式指定的场景；配置页说明同步更新。
 
 ### v3.3.5
 
@@ -146,7 +152,7 @@ V3 版本在原 V2 基础上完成合同迁移，并新增「电影多版本 / �
 | GET  | `/records?limit=200&success=true&type=dir&category=日番&since=2026-09-01&until=2026-09-26` | 最近刮削记录（时间 / 类型 / 标题 / 分类 / 结果 / 消息 / `error_code` / `exists` 目标是否仍存在）；`success` 只取成功/失败，`type` 只取 `dir`/`file`，`category` 只取该分类，`since`/`until` 为 `YYYY-MM-DD` 闭区间                                    |
 | GET  | `/records/clear`                                                                         | 清空刮削记录                                                                                                                                                                                                |
 | GET  | `/queue`                                                                                 | 队列快照：`running`（正在执行的目标，含 `kind`）、`queued`（前 50 条）、`queued_total`、`stats`（`done` / `failed` / `canceled` 累计）、`recent`（最近 20 条完成项）、`busy`。界面只轮询这一个接口                                                    |
-| POST | `/scrape`                                                                                | body：`{"paths": [...], "target": "dir"\|"file", "overwrite": true}`，`overwrite` 可省略（省略时用插件配置）；返回 `{"queued": n, "deduped": m}`                                                                        |
+| POST | `/scrape`                                                                                | body：`{"paths": [...], "target": "dir"\|"file", "overwrite": true}`。这是**手动刮削**入口，`overwrite` 省略时默认为 `true`（恒覆盖，与宿主原生手动刮削一致），显式传 `false` 才是「仅补缺失」；返回 `{"queued": n, "deduped": m}`                                                                        |
 | POST | `/queue/cancel`                                                                          | body：`{"mode": "all"\|"one", "target": "目录路径", "scope": "扫描范围"}`。`mode=all` 清空整个队列，`mode=one` 只取消匹配 `target`（含子树）或 `scope` 的项；正在执行的项不强行中断，只停止取后续项。返回 `{"canceled": n}`                                |
 | POST | `/retry_failed`                                                                          | body：`{"category": "分类路径"}`（可省略）。读状态表把 `status=failed` 的目录批量重新入队，返回 `{"queued": n, "deduped": m}`                                                                                                     |
 | GET  | `/scan?overwrite=false&scope=all&paths=<目录1,目录2>`                                        | 把一次扫描并入队列并立即返回。`scope` 四种：`all`=全部监控目录；`category`=只扫 `paths` 给出的分类目录（逗号分隔绝对路径，须在监控目录内）；`incremental`=只补新增与未刮的目录；`unscraped`=只刮状态非「已刮」的目录。`overwrite` 不传时跟随插件配置的「覆盖已有元数据」开关。重复的同类扫描只计一次（返回 `queued=0`） |
@@ -269,7 +275,7 @@ npm run build
 | -------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | 启用插件           | 开启目录实时监控                                                                                                                    |
 | 立即全量扫描一次       | 对监控目录内所有 .strm 全量刮削一次                                                                                                       |
-| 覆盖已有刮削结果       | 对应 `scrape_metadata` 的 `overwrite` 参数。**关**则跳过已有元数据、只补缺失项；**开**则整目录重刮覆盖。同时是 `/scan` 不传 `overwrite` 时的默认值，也是配置页「全量扫描」按钮跟随的取值 |
+| 覆盖已有刮削结果       | 对应 `scrape_metadata` 的 `overwrite` 参数。**关**则跳过已有元数据、只补缺失项；**开**则整目录重刮覆盖。同时是 `/scan` 不传 `overwrite` 时的默认值，也是 `/retry_failed` 与外部脚本未显式指定时的取值。**界面上的单条 / 整剧刮削按钮不受此开关影响，恒为覆盖** |
 | 记录刮削历史         | 把每次刮削的结果写入插件数据目录并在界面展示                                                                                                      |
 | 监控模式           | 性能模式（inotify）/ 兼容模式（轮询）                                                                                                     |
 | 监控目录           | 每行一个目录                                                                                                                      |
@@ -278,4 +284,5 @@ npm run build
 
 > 关于「覆盖已有刮削结果」：宿主的「文件已存在，跳过」**只对 `backdrop.jpg` 生效**，poster / fanart / clearart / logo / thumb / banner / disc / landscape 每次都会重新下载。  
 > 实测：13 个媒体（10 电影 + 3 电视剧）重扫一次，下载 134 张图片，耗时 **4 分 35 秒**，其中约 88% 花在图片下载上。  
-> 因此**日常维护建议关闭该开关**，只在图片损坏 / 想换图源时才开启；界面上的「全量扫描 → 覆盖重刮」等价于按次开启。
+> 因此**日常维护建议关闭该开关**，只在图片损坏 / 想换图源时才开启；界面上的「全量扫描 → 覆盖重刮」等价于按次开启。  
+> 注意：**界面上的单条 / 整剧刮削按钮恒为覆盖**（v3.3.6 起，与宿主原生手动刮削一致），不随该开关变化；只想补缺失请走「全量扫描 → 仅补缺失 / 增量扫描 / 补漏扫描」。

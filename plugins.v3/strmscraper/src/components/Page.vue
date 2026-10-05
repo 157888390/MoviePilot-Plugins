@@ -618,14 +618,16 @@ function startQueuePolling() {
 /**
  * 提交刮削并入队。target=dir 走目录级（递归整棵子树），target=file 走单集/单版本。
  *
- * 入队后立即拉一次队列快照，让进度提示即时出现，不用等下一次轮询。
+ * 手动操作一律带 overwrite:true —— 与宿主原生手动刮削一致，点一次就把目标范围内
+ * 已存在的 NFO 与图片重下一遍，不依赖配置页的「覆盖已有元数据」开关（那个只决定
+ * 全量扫描的默认值与重试失败项）。入队后立即拉一次队列快照，让进度提示即时出现。
  */
 async function postScrape(paths, target) {
   if (!paths.length) return
   error.value = ''
   notice.value = ''
   try {
-    const result = unwrap(await apiCall('post', '/scrape', { paths, target }))
+    const result = unwrap(await apiCall('post', '/scrape', { paths, target, overwrite: true }))
     const queued = result?.queued || 0
     const deduped = result?.deduped || 0
     notice.value = queued
@@ -1127,7 +1129,12 @@ onBeforeUnmount(() => {
               >
                 <i></i>{{ STATUS_LABELS[displayStatus(row)] }}
               </span>
-              <button class="strm-row-go" :disabled="busy" @click="scrapeOne(row)">刮削</button>
+              <button
+                class="strm-row-go"
+                :disabled="busy"
+                title="重下该条目的 NFO 与图片（覆盖）"
+                @click="scrapeOne(row)"
+              >刮削</button>
             </div>
           </div>
 

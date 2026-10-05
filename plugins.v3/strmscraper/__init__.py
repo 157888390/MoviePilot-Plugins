@@ -283,7 +283,7 @@ class StrmScraper(_PluginBase):
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：本轮移除侧栏入口、新增音乐类型识别、规范化并发与缓存）
-    plugin_version = "3.3.5"
+    plugin_version = "3.3.6"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -1678,7 +1678,7 @@ class StrmScraper(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "STRM刮削入队",
-                "description": "把目标并入刮削队列，target=dir 为目录级刮削，target=file 为单集/单版本刮削",
+                "description": "把目标并入刮削队列（手动刮削入口，overwrite 不传时默认覆盖）；target=dir 为目录级刮削，target=file 为单集/单版本刮削",
             },
             {
                 "path": "/queue",
@@ -2062,6 +2062,12 @@ class StrmScraper(_PluginBase):
         """
         把目标并入刮削队列；target=dir 走目录级，target=file 走单集/单版本。
 
+        这是**用户手动刮削**的入口（详情页「整剧/整目录重新刮削」与单集/版本按钮都打
+        这里），不传 ``overwrite`` 时按 ``True`` 处理 —— 与宿主原生手动刮削
+        （``api/endpoints/media.py`` 恒 ``overwrite=True``）语义一致：点一次就把目标
+        范围内已存在的 NFO 与图片重下一遍，不必先去配置页打开开关。只有显式传
+        ``overwrite=false`` 才是「仅补缺失」。
+
         目录级 ``recursive=True`` 会递归整棵子树，因此入队的目录项会自动吞掉队内位于
         其下的文件项，重复入队只会计入 ``deduped`` 而不产生额外刮削。
         """
@@ -2069,7 +2075,7 @@ class StrmScraper(_PluginBase):
         paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
         kind = "file" if body.get("target") == "file" else "dir"
         raw_overwrite = body.get("overwrite")
-        overwrite = None if raw_overwrite is None else bool(raw_overwrite)
+        overwrite = True if raw_overwrite is None else bool(raw_overwrite)
         if not paths:
             return self.__envelope(None, False, "缺少 paths 参数")
         illegal = [p for p in paths if not self.__is_allowed(p)]
@@ -2261,7 +2267,12 @@ class StrmScraper(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
-                                        "props": {"model": "overwrite", "label": "覆盖已有元数据"},
+                                        "props": {
+                                            "model": "overwrite",
+                                            "label": "覆盖已有元数据",
+                                            "hint": "决定全量扫描默认值；界面单条/整剧刮削恒为覆盖",
+                                            "persistent-hint": True,
+                                        },
                                     }
                                 ],
                             },

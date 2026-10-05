@@ -121,7 +121,7 @@ async function scanNow() {
         </label>
         <label class="cfg-switch">
           <input v-model="config.overwrite" type="checkbox">
-          <span><b>覆盖已有元数据</b><em>重刮时覆盖已存在的 NFO 与图片</em></span>
+          <span><b>覆盖已有元数据</b><em>决定全量扫描默认值；界面单条/整剧刮削恒为覆盖</em></span>
         </label>
         <label class="cfg-switch">
           <input v-model="config.record_enabled" type="checkbox">

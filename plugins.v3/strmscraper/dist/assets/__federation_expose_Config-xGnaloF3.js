@@ -187,7 +187,7 @@ return (_ctx, _cache) => {
           ]),
           _cache[11] || (_cache[11] = _createElementVNode("span", null, [
             _createElementVNode("b", null, "覆盖已有元数据"),
-            _createElementVNode("em", null, "重刮时覆盖已存在的 NFO 与图片")
+            _createElementVNode("em", null, "决定全量扫描默认值；界面单条/整剧刮削恒为覆盖")
           ], -1))
         ]),
         _createElementVNode("label", _hoisted_9, [
@@ -286,6 +286,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-928481c3"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0377e0fd"]]);
 
 export { Config as default };
