@@ -287,7 +287,7 @@ class StrmScraper(_PluginBase):
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：本轮移除侧栏入口、新增音乐类型识别、规范化并发与缓存）
-    plugin_version = "3.3.6"
+    plugin_version = "3.3.7"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
