@@ -56,14 +56,22 @@ jobs:
           while IFS= read -r pkg; do
             dir="$(dirname "$pkg")"
             echo "==> 构建前端：$dir"
-            # 用 npm install（而非 npm ci）以便按当前平台解析 esbuild/rollup 原生二进制；
-            # 锁文件里只记录了 Windows 平台的 optional 依赖，npm ci 在 Linux 会缺原生库。
-            (cd "$dir" && npm install --no-audit --no-fund && npm run build)
-            if ! git diff --quiet -- "$dir/dist"; then
+            # 在临时副本里构建，避免污染工作树；提交的 dist 逐字节比对。
+            work="$(mktemp -d)"
+            cp -r "$dir"/. "$work"/
+            rm -rf "$work/node_modules"
+            # 锁文件是本机（Windows）生成的，只记录了 win32 平台的 rollup/esbuild 原生依赖，
+            # 直接 npm install 在 Linux 会缺 @rollup/rollup-linux-x64-gnu。故删掉锁文件让 npm
+            # 按当前平台重新解析（仅作用于临时副本，仓库锁文件保持原样）。
+            rm -f "$work/package-lock.json"
+            (cd "$work" && npm install --no-audit --no-fund && npm run build)
+            if ! diff -r -q "$dir/dist" "$work/dist"; then
               echo "::error:: $dir/dist 与源码重构建产物不一致，请重新构建并提交" >&2
-              git diff --stat -- "$dir/dist"
+              diff -r -q "$dir/dist" "$work/dist" || true
+              rm -rf "$work"
               exit 1
             fi
+            rm -rf "$work"
             found=1
           done < <(find plugins.v3 -maxdepth 3 -name package.json -type f)
           echo "前端构建门禁通过（共 $found 个前端插件）"
