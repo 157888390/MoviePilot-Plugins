@@ -101,8 +101,12 @@ POSTER_CACHE_LIMIT = 512
 QUEUE_RECENT_LIMIT = 20
 # /queue 返回的「排队中」条数上限（队列本身不截断，仅展示时截断）
 QUEUE_SNAPSHOT_LIMIT = 50
+# stop_service 等待旧 worker 退出的超时（秒）：worker 卡在网络/IO 刮削时最多等这么久
+WORKER_STOP_TIMEOUT = 30
 # cron 单个字段的合法字符集（数字、通配、区间、步长、枚举；兼容 JAN 这类月/周英文名）
 CRON_FIELD_RE = re.compile(r"^[0-9*,\-/A-Za-z]+$")
+# 已告警过的非法排除正则（模块级去重：避免每扫一个文件都打一条告警刷屏）
+_BAD_REGEX_WARNED: set = set()
 
 
 def normalize_cron(expression: Any) -> str:
@@ -150,7 +154,7 @@ def scan_strm_files(root: Path, skip=None, limit: int = MAX_SCAN_FILES) -> List[
     for current, dirs, files in os.walk(str(root), onerror=_on_error, followlinks=False):
         dirs.sort()
         for name in sorted(files):
-            if not name.endswith(".strm"):
+            if not name.lower().endswith(".strm"):
                 continue
             full = Path(current) / name
             if skip is not None and skip(str(full)):
@@ -331,9 +335,16 @@ class StrmScraper(_PluginBase):
     _worker_token: Optional[object] = None   # 当前存活 worker 的代际令牌：旧 worker 正常耗尽后
                                              # 不得踩掉新 worker 刚置的 _worker_running
     _abort_epoch = 0                         # 递增的中止标记：插件重载时让上一代 worker 自行退出
-    # 取消令牌：请求取消时写入的 key（scan 项用 scope:paths 签名、普通项用 key）。
-    # worker 每取一项前检查，命中即跳过并写 skipped，正在执行项不强行中断。
-    _cancel_keys: set = set()
+    # 取消代次：取消操作递增 ``_cancel_epoch``，并把要跳过的 key（"*" 表示全部）登记到
+    # ``_cancel_record[epoch]``。只有「取消发生时仍在途」的项会命中跳过——新任务以更新的
+    # 代次入队，严格大于比较下不受旧取消影响，因此不会出现「取消一次、之后永远跳过」。
+    _cancel_epoch = 0
+    _cancel_record: Dict[int, set] = {}
+    # 当前存活 worker 的退出事件：worker 在 finally 里 set()，stop_service 据此等待其真正退场
+    _worker_done: Optional[threading.Event] = None
+    # 停止中标记：stop_service 进行中置 True，__ensure_worker 拒绝拉起新消费者，
+    # 避免重载窗口内文件事件/接口又拉起一个 worker 与旧 worker 并发刮削
+    _stopping = False
     # 扫描令牌：scan key 集合。scan 项一旦被 worker 取走展开，就不在队列里了，光靠 key
     # 判重挡不住「几秒内连点两次全量扫描」；这里记住「该扫描的展开项还没跑完」——
     # 展开出的目录项都带 origin=scan key，全部离开队列后令牌自动失效，因此不引入
@@ -342,6 +353,10 @@ class StrmScraper(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         """读取配置、清理历史遗留数据并按需重启目录监控，允许重复调用。"""
+        # 先停止上一代监控与消费者并等待其退出，再重置运行态：否则旧 worker 仍可能
+        # 在新一代缓存/磁盘上继续写状态，与新初始化互相覆盖。
+        self.stop_service()
+
         self._scraped = {}
         self._list_cache = {"time": 0.0, "items": []}
         self._list_dirty = True
@@ -351,7 +366,7 @@ class StrmScraper(_PluginBase):
             self._stats = {"done": 0, "failed": 0, "canceled": 0}
             self._recent = []
             self._scan_tokens = set()
-            self._cancel_keys = set()
+            self._cancel_record = {}
             self._worker_token = None
         # 历史版本遗留的刮削历史数据已不再使用（海报墙改由 Vue 详情页实现），直接清理
         try:
@@ -371,9 +386,6 @@ class StrmScraper(_PluginBase):
             # 缺省为 True：老配置没有这个键时保持记录开启
             self._record_enabled = config.get("record_enabled", True)
             # 历史配置里的 sidebar_enabled 已废弃：侧栏入口整体移除，读取时直接忽略
-
-        # 先停止现有监控
-        self.stop_service()
 
         if self._enabled:
             monitor_dirs = [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]
@@ -732,6 +744,32 @@ class StrmScraper(_PluginBase):
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir / STATE_FILE
 
+    @staticmethod
+    def __atomic_write_text(path: Path, text: str) -> None:
+        """
+        原子写文本：写同目录临时文件 → flush/fsync → ``os.replace`` 原子替换。
+
+        直接 ``write_text`` 覆盖时，进程崩溃/断电/网络盘写中断可能留下半截 JSON，
+        下次加载会回退成空表。临时文件 + 原子替换保证磁盘上要么是旧内容、要么是完整新内容。
+        """
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    @staticmethod
+    def __backup_corrupt(path: Path, err: Exception) -> None:
+        """把损坏的数据文件改名备份（避免下次又读到半截内容），并告警。"""
+        try:
+            bak = path.with_name(path.name + ".corrupt")
+            if path.exists():
+                os.replace(path, bak)
+            logger.warn(f"STRM数据文件损坏，已备份到 {bak}：{err}")
+        except Exception:
+            logger.warn(f"STRM数据文件损坏且备份失败：{err}")
+
     def __load_state(self) -> Dict[str, Dict[str, Any]]:
         """读取已落盘的状态表；文件缺失或损坏时返回空字典。"""
         try:
@@ -741,7 +779,7 @@ class StrmScraper(_PluginBase):
         except FileNotFoundError:
             return {}
         except Exception as e:
-            logger.debug(f"读取刮削状态失败：{e}")
+            self.__backup_corrupt(self.__state_path(), e)
             return {}
 
     def __ensure_state_loaded(self):
@@ -799,9 +837,9 @@ class StrmScraper(_PluginBase):
                     )
                     for stale_path, _ in ordered[: len(self._state_cache) - STATE_LIMIT]:
                         self._state_cache.pop(stale_path, None)
-                self.__state_path().write_text(
+                self.__atomic_write_text(
+                    self.__state_path(),
                     json.dumps(self._state_cache, ensure_ascii=False, indent=1),
-                    encoding="utf-8",
                 )
         except Exception as e:
             logger.debug(f"写入刮削状态失败（非阻断）：{e}")
@@ -848,7 +886,7 @@ class StrmScraper(_PluginBase):
         except FileNotFoundError:
             return []
         except Exception as e:
-            logger.debug(f"读取刮削记录失败：{e}")
+            self.__backup_corrupt(self.__record_path(), e)
             return []
 
     def __write_record(
@@ -881,8 +919,9 @@ class StrmScraper(_PluginBase):
                 })
                 if len(records) > RECORD_LIMIT:
                     records = records[-RECORD_LIMIT:]
-                self.__record_path().write_text(
-                    json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8"
+                self.__atomic_write_text(
+                    self.__record_path(),
+                    json.dumps(records, ensure_ascii=False, indent=1),
                 )
         except Exception as e:
             logger.debug(f"写入刮削记录失败（非阻断）：{e}")
@@ -918,20 +957,34 @@ class StrmScraper(_PluginBase):
         posix_path = raw_path.replace("\\", "/")
         if self._exclude_keywords:
             for kw in self._exclude_keywords.split("\n"):
-                if kw and re.findall(kw, raw_path):
-                    return True
+                kw = kw.strip()
+                if not kw:
+                    continue
+                try:
+                    if re.findall(kw, raw_path):
+                        return True
+                except re.error:
+                    # 非法正则只记一次告警并忽略该条规则，绝不让整次扫描/清单被它中断
+                    if kw not in _BAD_REGEX_WARNED:
+                        _BAD_REGEX_WARNED.add(kw)
+                        logger.warn(f"STRM排除关键词是非法正则，已忽略：{kw}")
+                    continue
         return any(p in posix_path for p in ["/@Recycle/", "/#recycle/", "/@eaDir", "/."])
 
     def __is_allowed(self, raw_path: str) -> bool:
         """
         校验路径是否位于已配置的监控目录内，防止接口越权刮削任意文件
         """
-        target = Path(raw_path).resolve()
+        try:
+            target = Path(raw_path).resolve()
+        except (OSError, RuntimeError):
+            # 权限异常、坏挂载等导致 resolve 失败：按「不在允许范围」处理，避免接口 500
+            return False
         for mon_path in [d.strip() for d in self._monitor_dirs.split("\n") if d.strip()]:
             try:
                 target.relative_to(Path(mon_path).resolve())
                 return True
-            except ValueError:
+            except (ValueError, OSError):
                 continue
         return False
 
@@ -1320,12 +1373,24 @@ class StrmScraper(_PluginBase):
         added = deduped = 0
         resolved = self._overwrite if overwrite is None else bool(overwrite)
         with self._queue_lock:
+            # 队列与执行中项都为空时，上一批任务已全部结束，取消记录随之失效，
+            # 清掉避免「取消一次后新任务被永久跳过」。
+            if not self._queue and self._current is None:
+                self._cancel_record = {}
             # 正在执行的项也算「在队内」，否则刚排上的目录会被重复入队
             active = self._queue + ([self._current] if self._current else [])
             for raw in items:
                 kind = str(raw.get("kind") or "dir")
                 target = str(raw.get("target") or "").strip()
                 key = str(raw.get("key") or f"{kind}:{target}")
+                origin = str(raw.get("origin") or "")
+                # 展开来源的扫描已被取消（"*" 或其 scan 签名命中）→ 直接丢弃，
+                # 不把已取消扫描展开出的目录项再塞进队列。
+                if origin and self.__should_skip(
+                    {"key": "", "origin": origin, "epoch": raw.get("epoch")}
+                ):
+                    deduped += 1
+                    continue
                 if target and self.__covered_by_dir(active, kind, target):
                     deduped += 1
                     continue
@@ -1356,6 +1421,8 @@ class StrmScraper(_PluginBase):
                     "overwrite": resolved,
                     "source": source,
                     "queued_at": time.time(),
+                    # 取消代次：默认取当前代次；scan 展开项由调用方传入（继承 scan 项代次）
+                    "epoch": raw.get("epoch", self._cancel_epoch),
                 }
                 for field in ("scope", "paths", "origin"):
                     if raw.get(field) is not None:
@@ -1456,12 +1523,14 @@ class StrmScraper(_PluginBase):
     def __ensure_worker(self):
         """没有存活 worker 时拉起一个；判断在锁内，避免并发建出两个消费线程。"""
         with self._queue_lock:
-            if self._worker_running or not self._queue:
+            if self._stopping or self._worker_running or not self._queue:
                 return
             token = object()
+            done = threading.Event()
             self._worker_token = token
+            self._worker_done = done
             self._worker_running = True
-        ThreadHelper().submit(self.__worker_loop, token)
+        ThreadHelper().submit(self.__worker_loop, token, done)
 
     def __cancel_match(self, item: Dict[str, Any], target: str, scope: str) -> bool:
         """
@@ -1482,18 +1551,26 @@ class StrmScraper(_PluginBase):
         return norm == target.replace("\\", "/").rstrip("/") or norm.startswith(prefix)
 
     def __should_skip(self, item: Dict[str, Any]) -> bool:
-        """取消标记命中：返回 True 表示跳过该项（不执行、写 skipped）。"""
-        if "*" in self._cancel_keys:
-            return True
+        """取消命中：返回 True 表示跳过该项（不执行、写 skipped）。
+
+        采用「取消代次」判定：只有取消代次**严格大于**该项入队代次的记录才会命中，
+        因此取消之后新提交的任务（代次更晚）不会被旧取消误伤。
+        """
+        item_epoch = int(item.get("epoch") or 0)
         key = str(item.get("key") or "")
-        if key and key in self._cancel_keys:
-            return True
         origin = str(item.get("origin") or "")
-        if origin and origin in self._cancel_keys:
-            return True
+        for epoch, keys in self._cancel_record.items():
+            if epoch <= item_epoch:
+                continue
+            if "*" in keys:
+                return True
+            if key and key in keys:
+                return True
+            if origin and origin in keys:
+                return True
         return False
 
-    def __worker_loop(self, token: object):
+    def __worker_loop(self, token: object, done: Optional[threading.Event] = None):
         """
         队列的唯一消费者：串行取出并执行，直到队列为空。
 
@@ -1504,20 +1581,26 @@ class StrmScraper(_PluginBase):
         重新拿锁之间，新 worker 可能已被拉起；只有 ``self._worker_token is token`` 时才
         允许旧 worker 清掉存活标记，否则会把新 worker 刚置的 ``True`` 踩回 ``False``，
         下次入队又拉起一个 worker，破坏「单消费者」不变式。
+
+        ``done`` 是本代 worker 的退出事件：退出时 set()，供 stop_service 等待其真正退场。
         """
         epoch = self._abort_epoch
         try:
             while True:
                 with self._queue_lock:
                     if epoch != self._abort_epoch:
-                        # 插件已重载，这一代 worker 立即退场，避免与新实例抢同一目录
+                        # 插件已重载，这一代 worker 立即退场，避免与新实例抢同一目录。
+                        # 清存活标记也要按代次判断：旧 worker 退场时新一代可能已接手，
+                        # 无条件置 False 会把新 worker 刚置的 True 踩掉。
                         logger.info("STRM刮削队列：插件已重载，消费者退出")
-                        self._worker_running = False
+                        if self._worker_token is token:
+                            self._worker_running = False
                         return
                     if not self._queue:
                         # 队列自然耗尽：必须在同一锁块内清掉存活标记，否则 __ensure_worker
                         # 会看到残留 True 而拒绝拉起新 worker，新入队的项就此僵死无人消费。
-                        self._worker_running = False
+                        if self._worker_token is token:
+                            self._worker_running = False
                         return
                     item = self._queue.pop(0)
                     if self.__should_skip(item):
@@ -1554,23 +1637,35 @@ class StrmScraper(_PluginBase):
                 if self._worker_token is token:
                     self._worker_running = False
                     self._worker_token = None
+            if done is not None:
+                done.set()
 
     def __run_item(self, item: Dict[str, Any]):
         """执行队列中的一项：scan 项展开成具体目录，其余直接刮削并累计统计。"""
         kind = str(item.get("kind") or "dir")
         if kind == "scan":
+            if self.__should_skip(item):
+                logger.info("STRM扫描：扫描已被取消，跳过展开")
+                return
             targets = self.__collect_scan_targets(
                 str(item.get("scope") or "all"), list(item.get("paths") or [])
             )
             if not targets:
                 logger.info("STRM扫描：范围内没有待刮削的目录")
                 return
+            # 枚举期间可能被取消：展开前再查一次，避免把已取消扫描的目录项塞进队列
+            if self.__should_skip(item):
+                logger.info("STRM扫描：扫描在枚举期间被取消，丢弃结果")
+                return
             logger.info(f"STRM扫描展开：{len(targets)} 个目录入队")
             # origin 记录「这批目录是哪次扫描展开出来的」，供 __scan_live 判断该扫描是否
-            # 还有未跑完的部分；不带这个标记的话，同目录下的文件事件项会让扫描令牌无法失效
+            # 还有未跑完的部分；不带这个标记的话，同目录下的文件事件项会让扫描令牌无法失效。
+            # epoch 继承 scan 项本身，保证「取消代次」能命中这些展开出的目录项。
             origin = str(item.get("key") or "")
+            scan_epoch = item.get("epoch")
             self.__enqueue(
-                [{"key": f"dir:{t}", "kind": "dir", "target": str(t), "origin": origin}
+                [{"key": f"dir:{t}", "kind": "dir", "target": str(t),
+                  "origin": origin, "epoch": scan_epoch}
                  for t in targets],
                 overwrite=item.get("overwrite"),
                 source=str(item.get("source") or "user"),
@@ -1810,9 +1905,20 @@ class StrmScraper(_PluginBase):
 
         local = self.__local_poster(media_dir)
         if local:
+            # 候选海报可能是符号链接，匿名接口不能让它指向监控根外的文件：
+            # resolve 出真实路径后必须仍落在允许根内，否则按 404 处理。
+            try:
+                real = local.resolve()
+            except OSError:
+                raise HTTPException(status_code=404, detail="poster not found")
+            if not any(
+                str(real) == r.rstrip(os.sep) or str(real).startswith(r)
+                for r in allowed_roots
+            ):
+                raise HTTPException(status_code=404, detail="poster not found")
             return FileResponse(
-                str(local),
-                media_type="image/jpeg" if local.suffix.lower() in (".jpg", ".jpeg") else "image/png",
+                str(real),
+                media_type="image/jpeg" if real.suffix.lower() in (".jpg", ".jpeg") else "image/png",
                 headers={"Cache-Control": "public, max-age=86400"},
             )
         remote = self.__tmdb_poster_url(media_dir, type)
@@ -2081,8 +2187,16 @@ class StrmScraper(_PluginBase):
         illegal = [p for p in paths if not self.__is_allowed(p)]
         if illegal:
             return self.__envelope({"illegal": illegal}, False, "存在不在监控目录范围内的路径")
+        # 校验通过后统一 resolve 再入队：相对路径 / 斜杠差异 / 符号链接路径会生成不同 key，
+        # 若不规范化会导致同一目标重复入队或状态 key 不一致（与 api_rescrape 口径一致）。
+        resolved_paths: List[str] = []
+        for p in paths:
+            try:
+                resolved_paths.append(str(Path(p).resolve()))
+            except OSError:
+                return self.__envelope({"illegal": [p]}, False, "存在无法解析的路径")
         result = self.__enqueue(
-            [{"key": f"{kind}:{p}", "kind": kind, "target": p} for p in paths],
+            [{"key": f"{kind}:{rp}", "kind": kind, "target": rp} for rp in resolved_paths],
             overwrite=overwrite,
             source="user",
         )
@@ -2117,30 +2231,38 @@ class StrmScraper(_PluginBase):
         ``mode=all`` 清空整个队列；``mode=one`` 只取消匹配 ``target``（含其子树）或
         ``scope`` 的项。正在执行的项不强行中断，只停止取后续项。
 
-        被取消的项加入 ``_cancel_keys``：若某个扫描项已被 worker 取走、正在展开，
-        它后续展开出的目录项会在取项时命中取消标记而跳过，不会继续刮削。
+        取消登记到「取消代次」：只有取消发生时仍在途的项会命中跳过（含正在展开的 scan
+        及其后续目录项），之后新提交的任务（代次更晚）不受影响。
         """
         body = payload or {}
         mode = str(body.get("mode") or "one")
         target = str(body.get("target") or "")
         scope = str(body.get("scope") or "")
         with self._queue_lock:
+            self._cancel_epoch += 1
+            epoch = self._cancel_epoch
             if mode == "all":
                 canceled = len(self._queue)
                 self._queue = []
-                self._cancel_keys.add("*")
+                self._cancel_record[epoch] = {"*"}
             else:
                 keep: List[Dict[str, Any]] = []
                 canceled = 0
                 for item in self._queue:
                     if self.__cancel_match(item, target, scope):
-                        key = str(item.get("key") or "")
-                        if key:
-                            self._cancel_keys.add(key)
                         canceled += 1
                     else:
                         keep.append(item)
                 self._queue = keep
+                keys: set = set()
+                # 正在执行的项无法从队列移除：若命中，记下其 key（scan 签名），
+                # 使其后续展开出的目录项（origin 相同）在取项时被跳过。
+                if self._current and self.__cancel_match(self._current, target, scope):
+                    key = str(self._current.get("key") or "")
+                    if key:
+                        keys.add(key)
+                if keys:
+                    self._cancel_record[epoch] = keys
             self._stats["canceled"] += canceled
         return self.__envelope({"canceled": canceled})
 
@@ -2457,21 +2579,34 @@ class StrmScraper(_PluginBase):
         """
         停止目录监控，并让刮削队列的消费者在下一个检查点退出。
 
-        ``_abort_epoch`` 递增后，上一代 worker 会在取下一项前发现自己已过期并主动退出 ——
-        插件重载时不会出现两个消费者同时刮削同一目录。
+        顺序很重要：先置停止标记并停掉 observer（不再有新事件），再递增中止代次并等待
+        旧 worker 真正退场（带超时），最后才允许新一代接管 —— 避免插件重载时新旧两个
+        消费者同时刮削同一目录、互相覆盖状态。
         """
+        self._stopping = True
         self._abort_epoch += 1
+        # 先停 observer：停止期间不应再有新的文件事件涌入并拉起新 worker
+        for observer in self._observer:
+            try:
+                observer.stop()
+            except Exception as e:
+                logger.error(f"停止STRM监控失败：{str(e)}")
         with self._queue_lock:
             self._queue = []
             self._worker_running = False
             self._worker_token = None
+            done = self._worker_done
             self._current = None
             self._scan_tokens = set()
-            self._cancel_keys = set()
+            self._cancel_record = {}
+        # 等待旧 worker 完全退出：worker 仍在 ScrapingChain 网络/IO 中时，立即把
+        # running 置 False 会让新一代 worker 抢跑，导致并发刮削与状态/队列互相覆盖。
+        if done is not None and not done.wait(timeout=WORKER_STOP_TIMEOUT):
+            logger.warn("STRM刮削队列：旧消费者未在超时内退出，可能存在短暂并发")
         for observer in self._observer:
             try:
-                observer.stop()
                 observer.join(timeout=5)
             except Exception as e:
                 logger.error(f"停止STRM监控失败：{str(e)}")
         self._observer = []
+        self._stopping = False

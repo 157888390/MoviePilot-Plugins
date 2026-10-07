@@ -7,6 +7,13 @@ on:
       - 'package.json'
       - 'package.v2.json'
       - 'package.v3.json'
+      # 前端产物与源码也纳入触发：只改插件前端源码 / dist / 构建配置时同样触发，
+      # 由下方「构建前端并校验 dist 一致性」步骤把关提交的 dist 是否漂移。
+      - 'plugins.v3/**/package.json'
+      - 'plugins.v3/**/package-lock.json'
+      - 'plugins.v3/**/src/**'
+      - 'plugins.v3/**/dist/**'
+      - 'plugins.v3/**/vite.config.*'
       # 本仓库为精简第三方仓，首次引入本工作流时不会有 package 文件变更，
       # 故把工作流与门禁脚本自身也纳入触发路径，使其能自举产生首个 Release。
       # 重复触发是安全的：脚本会跳过自上次 tag 以来无变更、且 Release 已存在的插件。
@@ -36,6 +43,30 @@ jobs:
 
       - name: Check federation plugin CSS
         run: python .github/scripts/check_federation_css.py
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build frontend plugins and verify dist consistency
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r pkg; do
+            dir="$(dirname "$pkg")"
+            echo "==> 构建前端：$dir"
+            # 用 npm install（而非 npm ci）以便按当前平台解析 esbuild/rollup 原生二进制；
+            # 锁文件里只记录了 Windows 平台的 optional 依赖，npm ci 在 Linux 会缺原生库。
+            (cd "$dir" && npm install --no-audit --no-fund && npm run build)
+            if ! git diff --quiet -- "$dir/dist"; then
+              echo "::error:: $dir/dist 与源码重构建产物不一致，请重新构建并提交" >&2
+              git diff --stat -- "$dir/dist"
+              exit 1
+            fi
+            found=1
+          done < <(find plugins.v3 -maxdepth 3 -name package.json -type f)
+          echo "前端构建门禁通过（共 $found 个前端插件）"
 
       - name: Build and release changed plugins
         env:
