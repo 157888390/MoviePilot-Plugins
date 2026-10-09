@@ -337,6 +337,38 @@ class LxServerClient:
             return None
         return data if isinstance(data, dict) else None
 
+    def fetch_lyric(self, song_info: dict, timeout: Optional[float] = None) -> Optional[str]:
+        """取歌曲的 LRC 歌词文本，取不到返回 None。
+
+        服务端 ``/api/music/lyric`` 是**内置 musicSdk 的 getLyric**，与自定义音源
+        脚本无关；返回 JSON 里的 ``lyric`` 字段即标准 LRC 文本（``[mm:ss.ms]歌词``）。
+        kg 需要 hash、mg 需要 copyrightId，这里按 ``song_info`` 尽量带全，缺了就交给
+        服务端按已有字段查。任何失败都静默返回 None，不打断下载主流程。
+        """
+        source = str(song_info.get("source") or "").strip().lower()
+        songmid = song_info.get("songmid") or song_info.get("id")
+        if not source or not songmid:
+            return None
+        params: dict[str, str] = {
+            "source": source,
+            "songmid": str(songmid),
+            "name": str(song_info.get("name") or ""),
+            "singer": str(song_info.get("singer") or ""),
+        }
+        if song_info.get("hash"):
+            params["hash"] = str(song_info["hash"])
+        if song_info.get("interval"):
+            params["interval"] = str(song_info["interval"])
+        try:
+            data = self._get("/api/music/lyric", params=params, timeout=timeout)
+        except LxServerError as err:
+            logger.debug(f"歌词查询失败（{source}:{songmid}）：{err}")
+            return None
+        if not isinstance(data, dict):
+            return None
+        lyric = str(data.get("lyric") or "").strip()
+        return lyric or None
+
     # ------------------------------------------------------------------ #
     #                              歌单                                    #
     # ------------------------------------------------------------------ #

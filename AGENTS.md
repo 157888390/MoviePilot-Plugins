@@ -46,8 +46,11 @@ MoviePilot-Plugins/
    `__federation_expose_Config-*.js` 渲染，后端 `get_form()` 的 `conf` schema 会被
    忽略**（宿主前端只在 `render_mode === "vuetify"` 时读 `conf`）。所以**新增配置项
    必须同步改前端源码并重建 `dist/`**，只改 `get_form()` 不会出现在界面上。
-   `lxmusicdownloader` 未附带前端源码，它的配置项只能通过
-   `PUT /api/v1/plugin/<PluginID>` 或直接改配置写入。
+   前端源码工程范式见 `strmscraper`（`src/components/*.vue` + `vite.config.js` +
+   `@originjs/vite-plugin-federation`）；`lxmusicdownloader` 已按此范式补齐
+   `src/` + `package.json`，改配置项后 `cd plugins.v3/lxmusicdownloader && npm run build`
+   重建 `dist/`。构建在 Windows 下需 `npm install --ignore-scripts` 绕过 esbuild
+   postinstall 的 EBUSY（二进制由 `@esbuild/win32-x64` 平台包直接提供）。
 9. **`get_service()` 返回的 `trigger` 必须是 APScheduler 的 Trigger 实例**
    （如 `CronTrigger.from_crontab("0 3 * * *")`）或 `cron`/`interval`/`date` 别名。
    宿主 `app/scheduler/reconcile.py` 会把它原样透传给 `add_job()` 的第 2 个位置参数，

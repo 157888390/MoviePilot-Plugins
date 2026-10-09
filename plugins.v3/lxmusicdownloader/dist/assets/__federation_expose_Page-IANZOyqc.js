@@ -68,10 +68,10 @@ return (_ctx, _cache) => {
   return (_openBlock(), _createElementBlock("div", _hoisted_1, [
     _createElementVNode("div", _hoisted_2, [
       _createElementVNode("div", {
-        class: _normalizeClass(['pg-chip', overview.value.auth_state === 'ok' ? 'is-ok' : 'is-warn'])
+        class: _normalizeClass(["pg-chip", overview.value.auth_state === 'ok' ? 'is-ok' : 'is-warn'])
       }, _toDisplayString(overview.value.auth_state === 'ok' ? '鉴权正常' : (overview.value.auth_state === 'anonymous' ? '未配置凭据' : '鉴权异常')), 3),
       _createElementVNode("div", {
-        class: _normalizeClass(['pg-chip', overview.value.enabled ? 'is-ok' : 'is-muted'])
+        class: _normalizeClass(["pg-chip", overview.value.enabled ? 'is-ok' : 'is-muted'])
       }, _toDisplayString(overview.value.enabled ? '插件已启用' : '插件未启用'), 3),
       _createElementVNode("div", _hoisted_3, [
         _createElementVNode("button", {
@@ -128,12 +128,12 @@ return (_ctx, _cache) => {
         _createElementVNode("b", null, _toDisplayString(overview.value.sidebar_enabled ? '已开启' : '已关闭'), 1)
       ])
     ]),
-    _cache[10] || (_cache[10] = _createStaticVNode("<div class=\"pg-commands\" data-v-cb70a03f><div class=\"pg-commands-title\" data-v-cb70a03f>远程命令</div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_search 歌曲名</code><span data-v-cb70a03f>搜索并列出候选</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_download 序号</code><span data-v-cb70a03f>按上次搜索序号下载</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_download 歌手 - 歌名</code><span data-v-cb70a03f>直接搜索首条并下载</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_playlist 歌单名</code><span data-v-cb70a03f>搜索歌单 / 粘贴链接查看曲目</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_playlist dl 歌单名</code><span data-v-cb70a03f>下载歌单前 50 首</span></div><div class=\"pg-cmd\" data-v-cb70a03f><code data-v-cb70a03f>/lx_stats</code><span data-v-cb70a03f>查看服务端缓存统计</span></div></div>", 1))
+    _cache[10] || (_cache[10] = _createStaticVNode("<div class=\"pg-commands\" data-v-50751e8c><div class=\"pg-commands-title\" data-v-50751e8c>远程命令</div><div class=\"pg-cmd\" data-v-50751e8c><code data-v-50751e8c>/lx_search 歌曲名</code><span data-v-50751e8c>搜索并列出候选</span></div><div class=\"pg-cmd\" data-v-50751e8c><code data-v-50751e8c>/lx_download 序号</code><span data-v-50751e8c>按上次搜索序号下载</span></div><div class=\"pg-cmd\" data-v-50751e8c><code data-v-50751e8c>/lx_download 歌手 - 歌名</code><span data-v-50751e8c>直接搜索首条并下载</span></div><div class=\"pg-cmd\" data-v-50751e8c><code data-v-50751e8c>/lx_playlist 歌单名</code><span data-v-50751e8c>搜索歌单 / 粘贴链接查看曲目</span></div><div class=\"pg-cmd\" data-v-50751e8c><code data-v-50751e8c>/lx_playlist dl 歌单名</code><span data-v-50751e8c>下载歌单前 50 首</span></div><div class=\"pg-cmd\" data-v-50751e8c><code data-v-50751e8c>/lx_stats</code><span data-v-50751e8c>查看服务端缓存统计</span></div></div>", 1))
   ]))
 }
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-cb70a03f"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-50751e8c"]]);
 
 export { Page as default };

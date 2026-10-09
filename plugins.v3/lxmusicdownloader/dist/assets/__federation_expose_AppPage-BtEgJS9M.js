@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import ConfigPanel from './__federation_expose_Config-QyqzE2sC.js';
+import ConfigPanel from './__federation_expose_Config-BwT5xNQn.js';
 import { _ as _export_sfc, m as makeApiCall, f as formatSize, S as SOURCES, Q as QUALITIES, s as songKey, c as coverOf, a as singerOf, q as qualitiesOf, p as playlistAuthorOf, b as playlistCountOf, d as playlistIdOf, e as playlistCoverOf, g as bodyOf, u as unwrap, h as supportsSongList } from './_plugin-vue_export-helper-DXLvoj9D.js';
 
 const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,unref:_unref,vModelText:_vModelText,withKeys:_withKeys,withDirectives:_withDirectives,renderList:_renderList,Fragment:_Fragment,vModelSelect:_vModelSelect,createTextVNode:_createTextVNode,vModelCheckbox:_vModelCheckbox,createVNode:_createVNode,withModifiers:_withModifiers,Teleport:_Teleport,createBlock:_createBlock} = await importShared('vue');
@@ -483,6 +483,7 @@ async function saveSettings(config) {
     error.value = `保存配置失败：${saveError?.message || saveError}`;
   }
 }
+
 const cacheInfo = () => stats.value || {};
 
 onMounted(() => { loadEverything(); });
@@ -498,7 +499,7 @@ return (_ctx, _cache) => {
       ], -1)),
       _createElementVNode("div", _hoisted_3, [
         _createElementVNode("span", {
-          class: _normalizeClass(['lx-chip', overview.value.auth_state === 'ok' ? 'is-ok' : 'is-warn'])
+          class: _normalizeClass(["lx-chip", overview.value.auth_state === 'ok' ? 'is-ok' : 'is-warn'])
         }, _toDisplayString(overview.value.auth_state === 'ok' ? '鉴权正常' : (overview.value.auth_state === 'anonymous' ? '未配置凭据' : '鉴权异常')), 3),
         _createElementVNode("span", _hoisted_4, _toDisplayString(overview.value.source_name || '-') + " · " + _toDisplayString(overview.value.quality || '-'), 1)
       ]),
@@ -517,11 +518,11 @@ return (_ctx, _cache) => {
     ]),
     _createElementVNode("div", _hoisted_8, [
       _createElementVNode("button", {
-        class: _normalizeClass(['lx-tab', tab.value === 'song' && 'is-active']),
+        class: _normalizeClass(["lx-tab", { 'is-active': tab.value === 'song' }]),
         onClick: _cache[0] || (_cache[0] = $event => (tab.value = 'song'))
       }, "单曲搜索", 2),
       _createElementVNode("button", {
-        class: _normalizeClass(['lx-tab', tab.value === 'playlist' && 'is-active']),
+        class: _normalizeClass(["lx-tab", { 'is-active': tab.value === 'playlist' }]),
         onClick: _cache[1] || (_cache[1] = $event => (tab.value = 'playlist'))
       }, "歌单", 2)
     ]),
@@ -624,7 +625,7 @@ return (_ctx, _cache) => {
                       class: "lx-row"
                     }, [
                       _createElementVNode("div", {
-                        class: _normalizeClass(["lx-cover", coverFailed[_unref(songKey)(song)] ? 'is-fallback' : ''])
+                        class: _normalizeClass(["lx-cover", { 'is-fallback': coverFailed[_unref(songKey)(song)] }])
                       }, [
                         (_unref(coverOf)(song) && !coverFailed[_unref(songKey)(song)])
                           ? (_openBlock(), _createElementBlock("img", {
@@ -716,7 +717,7 @@ return (_ctx, _cache) => {
           _createElementVNode("p", _hoisted_39, [
             _cache[21] || (_cache[21] = _createTextVNode(" 歌单能力由服务端内置 SDK 提供，与自定义音源脚本无关；整单下载落到", -1)),
             _createElementVNode("code", null, _toDisplayString(overview.value.download_dir || '-'), 1),
-            _cache[22] || (_cache[22] = _createTextVNode("， 目录整理交给 MoviePilot 本体。 ", -1)),
+            _cache[22] || (_cache[22] = _createTextVNode("，目录整理交给 MoviePilot 本体。 ", -1)),
             (!playlistSupported('search'))
               ? (_openBlock(), _createElementBlock("span", _hoisted_40, "（" + _toDisplayString(overview.value.source_name || source.value) + " 不支持歌单搜索，可粘贴链接或换平台）", 1))
               : _createCommentVNode("", true)
@@ -732,7 +733,7 @@ return (_ctx, _cache) => {
                     _createElementVNode("b", null, _toDisplayString(currentPlaylist.value.name || '未命名歌单'), 1),
                     _createElementVNode("span", _hoisted_44, _toDisplayString(_unref(playlistAuthorOf)(currentPlaylist.value)), 1),
                     (_unref(playlistCountOf)(currentPlaylist.value))
-                      ? (_openBlock(), _createElementBlock("span", _hoisted_45, _toDisplayString(_unref(playlistCountOf)(currentPlaylist.value)) + " 首 ", 1))
+                      ? (_openBlock(), _createElementBlock("span", _hoisted_45, _toDisplayString(_unref(playlistCountOf)(currentPlaylist.value)) + " 首", 1))
                       : _createCommentVNode("", true),
                     (playlistDetail.value?.truncated)
                       ? (_openBlock(), _createElementBlock("span", _hoisted_46, "已截断"))
@@ -805,7 +806,7 @@ return (_ctx, _cache) => {
                               ])
                             ]),
                             _createElementVNode("div", {
-                              class: _normalizeClass(["lx-cover", coverFailed[_unref(songKey)(song)] ? 'is-fallback' : ''])
+                              class: _normalizeClass(["lx-cover", { 'is-fallback': coverFailed[_unref(songKey)(song)] }])
                             }, [
                               (_unref(coverOf)(song) && !coverFailed[_unref(songKey)(song)])
                                 ? (_openBlock(), _createElementBlock("img", {
@@ -930,6 +931,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b14b9dc8"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-96fef6da"]]);
 
 export { AppPage as default };

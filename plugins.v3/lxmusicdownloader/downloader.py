@@ -258,6 +258,27 @@ class LxDownloader:
                 tmp.unlink(missing_ok=True)
 
     @staticmethod
+    def save_lyric(song_path: Path, lyric_text: str) -> Optional[Path]:
+        """把 LRC 歌词文本写到歌曲同名的 ``.lrc`` 文件，返回落盘路径。
+
+        歌词文件是纯旁路产物，任何失败都只记 debug 并返回 None，绝不影响下载。
+        目标已存在时直接跳过，避免重复下载时覆盖用户可能手工改过的歌词。
+        """
+        text = str(lyric_text or "").strip()
+        if not text:
+            return None
+        final = song_path.with_suffix(".lrc")
+        if final.exists():
+            return final
+        try:
+            final.write_text(text + "\n", encoding="utf-8")
+            logger.info(f"已写入歌词文件：{final.name}")
+            return final
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"歌词文件写入失败：{final} - {err}")
+            return None
+
+    @staticmethod
     def build_filename(song_info: dict, template: str = "{name} - {singer}") -> str:
         """按模板生成文件名主体（不含扩展名）。"""
         values = {

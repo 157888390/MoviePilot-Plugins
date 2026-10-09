@@ -229,7 +229,8 @@ SDK 内置重试 5 次后直接 `reject(new Error('搜索失败'))`，与账号�
 | `subdir_by_artist` | 是否按歌手建立子目录（仅单曲下载路径生效） |
 | `save_cover` | 是否额外保存封面图 |
 | `embed_tag` | 下载时带 `tag=1`，由服务端注入 ID3 标签（封面/标题/艺术家/专辑），不改变音频本体。插件另外按专辑曲目数补写发行类型标签 `releasetype`，详见「发行类型标签」 |
-| `embed_lyric` | 额外带 `lyric=1`，把歌词写入 `USLT` 帧；需 `embed_tag` 同时开启。建议开启，失败会自动降级 |
+| `embed_lyric` | 把歌词写入音频 `USLT` 帧，方便播放器直接读取；需 `embed_tag` 同时开启。建议开启，失败会自动降级 |
+| `download_lyric` | 下载 `.lrc` 歌词文件至歌曲同目录（代理下载路径下单独拉取歌词落盘）。与 `embed_lyric` 互不影响，默认开启 |
 | `split_artists` | 把「许嵩、何曼婷」这类拼接歌手拆成**多值**写进 artist 标签（默认开启）。详见「多歌手标签」 |
 | `use_server_cache` | 改为提交服务端缓存任务，而不是下载到本地 |
 | `recognize_enabled` | 开启音乐识别：注册为宿主的音乐数据源（`get_media_source()` / `get_module()`），并保留 `MusicMediaRecognize` 链式事件兜底 |

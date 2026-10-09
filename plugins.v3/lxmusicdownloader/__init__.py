@@ -67,7 +67,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.3.0"
+    plugin_version = "3.4.0"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -107,7 +107,10 @@ class LxMusicDownloader(_PluginBase):
         self._save_cover = bool(config.get("save_cover"))
         self._use_server_cache = bool(config.get("use_server_cache"))
         self._embed_tag = bool(config.get("embed_tag"))
-        self._embed_lyric = bool(config.get("embed_lyric"))
+        # 歌词两个开关独立：embed_lyric 写入 USLT 标签、download_lyric 落 .lrc 文件。
+        # 均默认开启（对齐 lxserver 同步下载的面板默认值）。
+        self._embed_lyric = bool(config.get("embed_lyric", True))
+        self._download_lyric = bool(config.get("download_lyric", True))
         self._split_artists = bool(config.get("split_artists", True))
         self._sidebar_enabled = bool(config.get("sidebar_enabled", True))
         self._recognize_enabled = bool(config.get("recognize_enabled"))
@@ -404,7 +407,13 @@ class LxMusicDownloader(_PluginBase):
         requested = str(info.get("requestedSource") or song.get("source") or "")
 
         if self._use_server_cache:
-            result = client.cache_download(song, play_url, real_quality)
+            result = client.cache_download(
+                song,
+                play_url,
+                real_quality,
+                cache_lyric=self._download_lyric,
+                embed_lyric=self._embed_lyric,
+            )
             return (
                 f"《{song.get('name')}》已提交服务端缓存任务（{real_quality}）。\n"
                 f"用 /lx_stats 查看进度。响应的 data：{str(result)[:180]}"
@@ -450,6 +459,18 @@ class LxMusicDownloader(_PluginBase):
                     lines.append(f"封面：{cover_path.name}")
             except Exception as err:  # noqa: BLE001
                 logger.warn(f"封面下载失败：{err}")
+
+        # 下载 .lrc 歌词文件：代理下载只返回音频流，歌词要单独拉取后落盘到同目录。
+        # 与 embed_lyric（写 USLT 标签）互不影响，可独立开关。
+        if self._download_lyric:
+            try:
+                lyric_text = client.fetch_lyric(song)
+                if lyric_text:
+                    lyric_path = self._downloader.save_lyric(saved, lyric_text)
+                    if lyric_path:
+                        lines.append(f"歌词：{lyric_path.name}")
+            except Exception as err:  # noqa: BLE001
+                logger.warn(f"歌词下载失败：{err}")
 
         return "\n".join(lines)
 
@@ -1207,7 +1228,17 @@ class LxMusicDownloader(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
-                                        "props": {"model": "embed_lyric", "label": "嵌入歌词"},
+                                        "props": {"model": "embed_lyric", "label": "嵌入 USLT 标签"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "download_lyric", "label": "下载歌词文件"},
                                     }
                                 ],
                             },
@@ -1264,6 +1295,7 @@ class LxMusicDownloader(_PluginBase):
             "save_cover": False,
             "embed_tag": True,
             "embed_lyric": True,
+            "download_lyric": True,
             "use_server_cache": False,
             "sidebar_enabled": True,
             "split_artists": True,
