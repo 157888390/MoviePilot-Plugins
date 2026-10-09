@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import html
+import os
 import re
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -112,8 +114,12 @@ class LxDownloader:
             break
 
         suffix = sniff_suffix(head[:16]) or QUALITY_EXT.get(str(quality).lower(), ".mp3")
-        final = self._unique_path(dest_dir / f"{base_name}{suffix}")
-        tmp = final.with_name(final.name + ".part")
+        # 原子占位目标名：O_CREAT|O_EXCL 保证并发下载同名歌曲时各拿各的名字，
+        # 不会两个线程同时选中同一个 final 再互相覆盖。
+        final = self._reserve_path(dest_dir / f"{base_name}{suffix}")
+        # 临时文件用随机后缀独占：即使（异常情况下）两个线程撞上同一个 final，
+        # 也不会共用一个 .part 互相写坏。
+        tmp = final.with_name(f"{final.name}.{uuid.uuid4().hex[:8]}.part")
 
         written = 0
         try:
@@ -131,8 +137,17 @@ class LxDownloader:
                 self.apply_artists(tmp, artists)
             if album_type:
                 self.apply_album_type(tmp, album_type)
+            # 原子覆盖占位文件；失败会走 except 分支清掉占位，避免留下 0 字节死文件
             tmp.replace(final)
+        except Exception:  # noqa: BLE001
+            # 落盘失败：清掉占位文件（此时 final 仍是 0 字节占位）再抛出
+            try:
+                final.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         finally:
+            # 只删自己的临时文件：随机后缀保证不会误删并发线程正在写的 .part
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
 
@@ -302,14 +317,22 @@ class LxDownloader:
         return cleaned or "unknown"
 
     @staticmethod
-    def _unique_path(path: Path) -> Path:
-        """目标文件已存在时追加序号，避免覆盖历史下载。"""
-        if not path.exists():
-            return path
-        stem, suffix, parent = path.stem, path.suffix, path.parent
+    def _reserve_path(path: Path) -> Path:
+        """原子地占位一个尚不存在的目标路径，并发调用各拿各的名字。
+
+        用 ``os.open(O_CREAT | O_EXCL)`` 一次性完成「检查 + 创建」，比先
+        ``exists()`` 再选名的两步做法多一层原子性：两个线程同时请求同名文件时，
+        只有一个能成功创建占位文件，另一个会撞 ``FileExistsError`` 并顺延到下一个序号。
+        """
+        parent = path.parent
+        stem, suffix = path.stem, path.suffix
+        candidate = path
         index = 1
         while True:
-            candidate = parent / f"{stem} ({index}){suffix}"
-            if not candidate.exists():
+            try:
+                fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
                 return candidate
-            index += 1
+            except FileExistsError:
+                candidate = parent / f"{stem} ({index}){suffix}"
+                index += 1

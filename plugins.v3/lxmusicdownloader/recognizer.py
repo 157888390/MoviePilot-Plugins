@@ -64,6 +64,9 @@ _ARTIST_HIT = 30
 _ARTIST_MISS = -20
 _ALBUM_HIT = 10
 
+# 本地缺歌手时，标题完全一致的降级分：低于采信阈值，须再凑到专辑等额外证据
+_TITLE_EXACT_NO_ARTIST = 55
+
 # 低于此分宁可不回写：留"未分类"只是维持现状，写错专辑却会导到错误目录
 MIN_SCORE = 60
 
@@ -138,8 +141,10 @@ def score_candidate(payload: dict, song: dict) -> int:
     if not query_title or not song_title:
         return 0
 
+    exact_title = False
     if query_title == song_title:
         score = _TITLE_EXACT
+        exact_title = True
     elif _base(payload.get("title")) == _base(song.get("name")):
         # 基名相同但括号补充不同：可能是 live / 重制版，先记分再由阈值裁决
         score = _TITLE_BASE
@@ -152,6 +157,11 @@ def score_candidate(payload: dict, song: dict) -> int:
     remote_artists = _artist_keys(song.get("singer"))
     if local_artists and remote_artists:
         score += _ARTIST_HIT if local_artists & remote_artists else _ARTIST_MISS
+    elif exact_title:
+        # 本地缺歌手时，仅标题完全一致不足以采信：同名翻唱 / 现场版 / 不同发行
+        # 都会拿到同分，首条可能被赋予错误的 media_id 与专辑类型。降到阈值以下，
+        # 必须再凑到专辑命中（+10）等额外证据才够 MIN_SCORE。
+        score = _TITLE_EXACT_NO_ARTIST
 
     local_album = _key(payload.get("album"))
     if local_album and local_album == _key(song.get("albumName")):
@@ -416,12 +426,16 @@ class LxMusicRecognizer:
         if str(payload.get("music_type") or "recording") != "recording":
             return None
 
+        # 缓存键必须带上 year：build_mediainfo 会把请求里的本地年份回写进结果，
+        # 若同 title/artist/album 但年份不同的两次识别共用一个缓存，第二次会拿到
+        # 第一次的年份，宿主按本地证据校验时可能因此拒绝结果。
         cache_key = "|".join(
             (
                 self._source,
                 _key(title),
                 ",".join(sorted(_artist_keys(payload.get("artists")))),
                 _key(payload.get("album")),
+                str(payload.get("year") or ""),
             )
         )
         hit, cached = self._cache_get(self._songs, cache_key)

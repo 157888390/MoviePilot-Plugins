@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -615,30 +616,40 @@ class LxMusicDownloader(_PluginBase):
         skip_existing: bool = True,
         max_songs: int = 1000,
         limit: int = 0,
+        songs: Optional[list[dict]] = None,
+        playlist_name: str = "",
     ) -> dict:
         """整单下载：并发解析 + 落盘，逐首给出成功/失败明细。
 
-        ``limit > 0`` 时只取歌单前 N 首（远程命令用）。并发默认 3，与服务端
+        ``songs`` 非空时只下载前端勾选的这些曲目（不再重新拉取整张歌单）；
+        否则按 ``limit``（>0 取前 N 首）从服务端拉取整单。并发默认 3，与服务端
         下载队列的默认并发保持一致，避免把上游打爆。
         """
-        payload = self.fetch_playlist(playlist_id, source=source, max_songs=max_songs)
-        songs: list[dict] = payload["songs"]
-        if limit and limit > 0:
-            songs = songs[:limit]
+        truncated = False
+        playlist_total: Optional[int] = None
+        resolved_source = source
+        if songs:
+            selected = [s for s in songs if isinstance(s, dict)]
+            name = playlist_name or f"歌单 {playlist_id[:12]}"
+        else:
+            payload = self.fetch_playlist(playlist_id, source=source, max_songs=max_songs)
+            selected = [s for s in payload["songs"] if isinstance(s, dict)]
+            if limit and limit > 0:
+                selected = selected[:limit]
+            info = payload.get("info") or {}
+            name = str(info.get("name") or "").strip() or f"歌单 {playlist_id[:12]}"
+            resolved_source = payload.get("source") or source
+            truncated = bool(payload.get("truncated"))
+            playlist_total = payload.get("total", len(selected))
 
-        info = payload.get("info") or {}
-        playlist_name = str(info.get("name") or "").strip()
-        if not playlist_name:
-            playlist_name = f"歌单 {playlist_id[:12]}"
-
-        if not songs:
+        if not selected:
             return {
-                "name": playlist_name,
+                "name": name,
                 "total": 0,
                 "success": 0,
                 "failed": 0,
                 "skipped": 0,
-                "truncated": False,
+                "truncated": truncated,
                 "items": [],
                 "message": "歌单内没有可下载的歌曲",
             }
@@ -648,7 +659,7 @@ class LxMusicDownloader(_PluginBase):
         quality = quality or self._quality
 
         workers = max(1, min(int(concurrency or 3), 8))
-        results: list[Optional[dict]] = [None] * len(songs)
+        results: list[Optional[dict]] = [None] * len(selected)
         cursor = threading.Lock()
         next_index = 0
 
@@ -657,15 +668,15 @@ class LxMusicDownloader(_PluginBase):
             nonlocal next_index
             while True:
                 with cursor:
-                    if next_index >= len(songs):
+                    if next_index >= len(selected):
                         return
                     position = next_index
                     next_index += 1
                 results[position] = self._download_playlist_item(
-                    songs[position], position + 1, target_dir, quality, skip_existing
+                    selected[position], position + 1, target_dir, quality, skip_existing
                 )
 
-        threads = [threading.Thread(target=consume, daemon=True) for _ in range(min(workers, len(songs)))]
+        threads = [threading.Thread(target=consume, daemon=True) for _ in range(min(workers, len(selected)))]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -677,14 +688,14 @@ class LxMusicDownloader(_PluginBase):
         failed = [item for item in items if item["status"] == "failed"]
 
         return {
-            "name": playlist_name,
-            "source": payload.get("source") or source,
+            "name": name,
+            "source": resolved_source,
             "dir": str(target_dir),
             "quality": quality,
-            "total": len(songs),
-            "playlist_total": payload.get("total", len(songs)),
-            "truncated": bool(payload.get("truncated")),
-            "limited": bool(limit and limit > 0 and payload.get("total", 0) > limit),
+            "total": len(selected),
+            "playlist_total": playlist_total if playlist_total is not None else len(selected),
+            "truncated": truncated,
+            "limited": bool(limit and limit > 0 and (playlist_total or 0) > limit),
             "success": len(succeeded),
             "failed": len(failed),
             "skipped": len(skipped),
@@ -1532,11 +1543,14 @@ class LxMusicDownloader(_PluginBase):
             if not isinstance(song, dict) or not song:
                 if not kw:
                     return {"success": False, "message": "缺少 song 或 keyword 参数"}
-                songs = self.get_client().search(kw, source=self._source, limit=1)
+                songs = await asyncio.to_thread(
+                    self.get_client().search, kw, source=self._source, limit=1
+                )
                 if not songs:
                     return {"success": False, "message": f"「{self._source}」没有搜索到与「{kw}」相关的歌曲"}
                 song = songs[0]
-            message = self._download_song(song, data.get("quality"))
+            # 同步下载是长流程（含大文件写盘），放线程池避免阻塞事件循环
+            message = await asyncio.to_thread(self._download_song, song, data.get("quality"))
             return {"success": True, "message": message, "data": {
                 "name": song.get("name"), "singer": song.get("singer"),
             }}
@@ -1627,13 +1641,17 @@ class LxMusicDownloader(_PluginBase):
             limit = 0
 
         try:
-            result = self.download_playlist(
+            # 整单下载内部并发 + join，也是长流程，放线程池避免阻塞事件循环
+            result = await asyncio.to_thread(
+                self.download_playlist,
                 playlist_id,
                 source=str(data.get("source") or ""),
                 quality=data.get("quality"),
                 concurrency=concurrency,
                 skip_existing=bool(data.get("skip_existing", True)),
                 limit=max(0, limit),
+                songs=data.get("songs"),
+                playlist_name=str(data.get("name") or ""),
             )
         except LxServerError as err:
             return self._fail(err)

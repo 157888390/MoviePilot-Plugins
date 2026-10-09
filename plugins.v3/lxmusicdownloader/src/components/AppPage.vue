@@ -244,8 +244,8 @@ function toggleAllSongs(checked) {
 
 async function downloadPlaylist() {
   const list = playlistDetail.value?.songs || []
-  // 未勾选任何曲目时，按「整单」处理（不传 songs，服务端重新拉全量）
-  list.filter(song => batchSelected[songKey(song)])
+  // 勾选了曲目就只下载选中的；一个都没勾才按「整单」处理（不传 songs，服务端重新拉全量）
+  const selected = list.filter(song => batchSelected[songKey(song)])
   batchRunning.value = true
   error.value = ''
   notice.value = ''
@@ -257,6 +257,10 @@ async function downloadPlaylist() {
       quality: quality.value,
       concurrency: batchConcurrency.value,
       skip_existing: true,
+    }
+    if (selected.length) {
+      payload.songs = selected
+      payload.name = currentPlaylist.value?.name || ''
     }
     const body = bodyOf(await apiCall('post', '/playlist/download', payload))
     if (body?.success === false) throw new Error(body.message || '整单下载失败')
