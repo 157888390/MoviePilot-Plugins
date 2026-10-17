@@ -18,7 +18,7 @@
    与本地不一致时**整条结果被丢弃**（只留一行 warning，表现为"插件明明返回了却没生效"）。
    所以这里对 ``title`` / ``artists`` / ``year`` / ``album`` 一律**优先回显事件载荷里的
    本地值**，只有本地缺该字段时才用 LX 的值补齐。真正的新增信息是
-   ``media_source`` / ``media_id`` / ``album_type`` / ``track_number``。
+   ``media_source`` / ``media_id`` / ``album_type`` / ``track_number`` / ``cover_url``。
 2. **搜索结果里的 ``albumId`` 在顶层，不在 ``meta`` 里**，而插件下载链路读的是 ``meta``。
    两边取值方式不同，别混。
 3. **``getAlbumSongs`` 只有 tx / wy 两个平台实现**，kw / kg / mg 没有 extendDetail，
@@ -330,6 +330,7 @@ def build_album_detail(album_payload: dict, media_id: str) -> dict:
     """把 LX 的专辑曲目表转成 MusicAlbumInfo 字典。
 
     ``media_id`` 必须**原样**回填：宿主用字符串严格比对，改一个字面整条就被丢弃。
+    封面取 ``albumSongs`` 顶层 ``img`` / ``picUrl``，缺失时回落首曲，宿主侧无需再请求。
     """
     tracks: list[dict] = []
     for index, song in enumerate(album_payload.get("list") or [], start=1):
@@ -368,6 +369,17 @@ def build_album_detail(album_payload: dict, media_id: str) -> dict:
         year = _year_from_date(publish_date)
         if year:
             info["year"] = year
+
+    # 专辑封面：wy / tx 都在 albumSongs 顶层给 img（tx 还按 albummid 直拼 800x800）。
+    # 个别平台只把图挂在曲目上，此时回落首曲，避免专辑页整块无图。
+    cover_url = album_payload.get("img") or album_payload.get("picUrl")
+    if not cover_url:
+        cover_url = next(
+            (track["cover_url"] for track in tracks if track.get("cover_url")),
+            None,
+        )
+    if cover_url:
+        info["cover_url"] = cover_url
     return info
 
 
