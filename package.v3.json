@@ -5,6 +5,7 @@
     "labels": "音乐,下载,歌单,LX音源",
     "version": "3.5.0",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/lxmusicdownloader.png",
+    "plugin_readme": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/plugins.v3/lxmusicdownloader/README.md",
     "author": "157888390",
     "level": 1,
     "release": true,
@@ -23,6 +24,7 @@
     "labels": "刮削,STRM,监控",
     "version": "3.3.7",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/strmscraper.png",
+    "plugin_readme": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/plugins.v3/strmscraper/README.md",
     "author": "157888390",
     "level": 1,
     "release": true,
@@ -37,6 +39,21 @@
       "v3.1.1": "补齐中文 docstring；新增 plugin_label",
       "v3.1.0": "新增详情页状态面板、侧栏开关与 /cover 海报接口",
       "v3.0.0": "首个 V3 版本：改用 ScrapingChain；支持电影多版本与剧集单集"
+    }
+  },
+  "NfoCompleter": {
+    "name": "NFO 补全",
+    "description": "监控目录中的 .nfo 文件，检测缺失或不完整的字段（标题、年份、简介、类型、评分、演职员等）并用 TMDB 数据补全，只补缺失、不覆盖已有内容，写回前备份。",
+    "labels": "NFO,元数据,补全,刮削,监控",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/nfocompleter.png",
+    "plugin_readme": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/plugins.v3/nfocompleter/README.md",
+    "author": "157888390",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.0.3",
+    "history": {
+      "v1.0.0": "首个版本：监控 NFO 并用 TMDB 补全缺失字段"
     }
   }
 }
