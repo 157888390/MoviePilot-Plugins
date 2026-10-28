@@ -33,6 +33,7 @@ from app.sdk.plugin import _PluginBase
 
 from .downloader import LxDownloader, split_artists
 from .lxserver import SUPPORTED_SOURCES, LxServerClient, LxServerError
+from .organizer import organize_download
 from .recognizer import ALBUM_SONG_SOURCES, MEDIA_SOURCE, LxMusicRecognizer
 
 # 单次搜索缓存的结果数，供远程命令按序号下载
@@ -68,7 +69,7 @@ class LxMusicDownloader(_PluginBase):
         "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins"
         "/main/icons/lxmusicdownloader.png"
     )
-    plugin_version = "3.4.1"
+    plugin_version = "3.5.0"
     plugin_author = "157888390"
     author_url = "https://github.com/157888390"
     plugin_config_prefix = "lxmusicdownloader_"
@@ -103,6 +104,8 @@ class LxMusicDownloader(_PluginBase):
         self._source = str(config.get("source") or "kw")
         self._quality = str(config.get("quality") or "320k")
         self._download_path = str(config.get("download_path") or "")
+        self._organize_enabled = bool(config.get("organize_enabled"))
+        self._library_path = str(config.get("library_path") or "").strip()
         self._name_template = str(config.get("name_template") or "{name} - {singer}")
         self._subdir_by_artist = bool(config.get("subdir_by_artist"))
         self._save_cover = bool(config.get("save_cover"))
@@ -418,6 +421,7 @@ class LxMusicDownloader(_PluginBase):
             return (
                 f"《{song.get('name')}》已提交服务端缓存任务（{real_quality}）。\n"
                 f"用 /lx_stats 查看进度。响应的 data：{str(result)[:180]}"
+                + ("\n整理：服务端缓存模式不执行本地归档" if self._organize_enabled else "")
             )
 
         return self._download_local(song, play_url, real_quality)
@@ -472,6 +476,10 @@ class LxMusicDownloader(_PluginBase):
                         lines.append(f"歌词：{lyric_path.name}")
             except Exception as err:  # noqa: BLE001
                 logger.warn(f"歌词下载失败：{err}")
+
+        if self._organize_enabled:
+            result = organize_download(song, saved, self._library_path)
+            lines.append(f"整理：{result['message']}")
 
         return "\n".join(lines)
 
@@ -1299,6 +1307,8 @@ class LxMusicDownloader(_PluginBase):
             "source": "kw",
             "quality": "320k",
             "download_path": "",
+            "organize_enabled": False,
+            "library_path": "",
             "name_template": "{name} - {singer}",
             "max_results": MAX_CANDIDATES,
             "playlist_concurrency": 3,

@@ -24,6 +24,8 @@ const DEFAULTS = {
   source: 'kw',
   quality: '320k',
   download_path: '',
+  organize_enabled: false,
+  library_path: '',
   name_template: '{name} - {singer}',
   max_results: 10,
   playlist_concurrency: 3,
@@ -170,6 +172,19 @@ async function testConnection() {
         <span class="cfg-label">下载位置</span>
         <input v-model="config.download_path" class="cfg-input" placeholder="/media/music，留空使用插件数据目录下的 music">
       </div>
+      <div class="cfg-section">独立整理</div>
+      <div class="cfg-grid">
+        <label class="cfg-switch">
+          <input v-model="config.organize_enabled" type="checkbox">
+          <span><b>下载后自动整理</b><em>把已完成歌曲归档到歌手/专辑目录，目标存在时跳过</em></span>
+        </label>
+      </div>
+      <div class="cfg-field">
+        <span class="cfg-label">音乐库根目录</span>
+        <input v-model="config.library_path" class="cfg-input" placeholder="/media/music-library">
+      </div>
+      <p class="cfg-tip">首版按「歌手/专辑/曲号 - 歌名」归档，保留下载源文件；不覆盖目标音频，封面和歌词随音频复制。</p>
+
       <div class="cfg-field">
         <span class="cfg-label">文件名模板</span>
         <input v-model="config.name_template" class="cfg-input" placeholder="支持 {name} {singer} {album} {source} {songmid}">
