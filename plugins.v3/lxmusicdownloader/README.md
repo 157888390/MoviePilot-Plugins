@@ -125,11 +125,17 @@ npm run build          # 产出 dist/，需一并提交
 
 ## 已知的接口行为（实测）
 
-1. `GET /api/music/search` **返回裸数组**，不是 `{list: [...]}`。
+1. `GET /api/music/search` 的响应形状随服务端版本变化：旧版 `type=song` **返回裸数组**；
+   新版（2026-11 起）统一返回 `{list, total, allPage, fetchedPages, hasMore}`。
+   插件的 `_parse_search()` 两种都吃，不要假设只有一种。
 2. `x-user-name` 与 `x-user-token` 必须成对携带；都不传则按公开用户 `open` 走。
 3. `POST /api/music/url` **强依赖服务端已启用的自定义音源**。公开用户没有音源时固定返回
    `HTTP 500 未找到支持 xx 平台的自定义源`，所以必须配置 token。
-4. `search` 的 `limit` 参数服务端不严格截断（实测请求 5 条仍返回 20 条），插件侧补了本地截断。
+4. `search` 的分页语义也变过：旧版歌曲分支每页固定 20 条、`limit` 不生效，要多拿必须加大
+   `pages`；新版只要带了 `limit` 就只取「第 `page` 页、每页 `min(limit, 平台单页上限)`」，
+   **`pages` 被完全忽略**。平台单页上限：`kw` 200、`tx` 60、`kg`/`bd` 30、`wy`/`mg` 20。
+   插件现在的做法是始终带 `limit`，拿 `hasMore` 判断后按 `page+1` 补页，最后本地截断，
+   旧服务端（裸数组、无 `hasMore`）自然只发一次请求。
 5. 下载响应的**真实容器与请求音质可能不一致**（请求 320k 可能返回 ogg，请求 flac 可能返回 mp3），
    因此扩展名按响应文件头嗅探决定，不写死。
 6. **`tag=1`（注入 ID3）不是转码开关**。实测咪咕 `flac24bit`：不带 tag 得到 3,577,106 B 的 MP3，
@@ -147,8 +153,11 @@ npm run build          # 产出 dist/，需一并提交
 
 由此得到几条与直觉相反的结论：
 
-1. **搜索的 `limit` 参数对歌曲无效**。源码里歌曲分支 `PAGE_SIZE` 恒为 20，`limit` 只用于
-   歌手/专辑/歌单。要多拿候选必须加大 `pages`，插件已按 `ceil(limit/20)` 自动换算。
+1. **搜索的候选条数由服务端版本决定**。旧版歌曲分支 `PAGE_SIZE` 恒为 20、`limit` 只用于
+   歌手/专辑/歌单，多拿候选得加大 `pages`；新版按各源 `api.limit`（`kw` 200、`tx` 60、
+   `kg`/`bd` 30、`wy`/`mg` 20）取单页，不带 `limit` 才翻全量（上限 60 页 / 4000 条 / 15 秒），
+   带 `limit` 时 `pages` 被忽略。插件两种服务端都兼容：`pages` 照旧发送给旧版，同时用
+   `hasMore` 补页给新版。
 2. **`GET /api/custom-source/list` 的用户名取自 URL 参数 `username`**（缺省 `default`），
    **不读 `x-user-name` 头**。早期版本没传该参数，导致诊断恒返回空数组，被误判成
    「服务端没有启用任何音源」。修复后可见该用户名下已启用

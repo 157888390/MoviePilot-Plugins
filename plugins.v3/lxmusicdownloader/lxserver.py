@@ -7,7 +7,8 @@
 接口约定（与 XCQ0607/lxserver 的 `src/server/server.ts` 对齐）：
 - ``GET  /api/user/auth/verify``            校验 token，可反查绑定的 username
 - ``POST /api/user/login``                  ``{username, password}`` -> ``{success, token}``
-- ``GET  /api/music/search``                ``name/source/type/page/pages/limit``，**返回裸数组**
+- ``GET  /api/music/search``                ``name/source/type/page/pages/limit``；新版服务端返回
+  ``{list, total, allPage, fetchedPages, hasMore}``，旧版 ``type=song`` 返回裸数组
 - ``GET  /api/music/albumSongs``            ``id/source`` -> 整张专辑曲目 + 发行日期（**仅 tx / wy 支持**）
 - ``POST /api/music/url``                   ``{songInfo, quality}`` -> ``{url, quality}``
 - ``GET  /api/music/download``              代理下载，``tag=1`` 注入 ID3，响应为二进制流
@@ -254,6 +255,34 @@ class LxServerClient:
     # ------------------------------------------------------------------ #
     #                              业务                                    #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _search_item_key(source: str, item: dict) -> str:
+        """单条搜索结果的身份键，用于跨页补齐时判重（与服务端的取键顺序一致）。"""
+        for key in ("id", "songmid", "mid", "hash", "copyrightId", "strMediaMid"):
+            value = item.get(key)
+            if value not in (None, ""):
+                return f"{source}_{value}"
+        return f"{source}_{item.get('name', '')}-{item.get('singer', '')}"
+
+    def _parse_search(self, data: Any, source: str) -> tuple[list[dict], bool]:
+        """把搜索响应拆成 (条目列表, 是否还有下一页)。
+
+        新旧两版服务端都能吃：旧版 ``type=song`` 直接返回裸数组（没有分页信息，
+        视为已取完），新版统一返回 ``{list, total, allPage, fetchedPages, hasMore}``。
+        """
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)], False
+        if not isinstance(data, dict):
+            logger.warn(f"搜索响应结构无法识别：{str(data)[:200]}")
+            return [], False
+        items: list[dict] = []
+        for key in ("list", "data", "songs", "result"):
+            value = data.get(key)
+            if isinstance(value, list):
+                items = [item for item in value if isinstance(item, dict)]
+                break
+        return items, bool(data.get("hasMore"))
+
     def search(
         self,
         name: str,
@@ -264,10 +293,17 @@ class LxServerClient:
         limit: int = 20,
         timeout: Optional[float] = None,
     ) -> list[dict]:
-        """搜索歌曲。该接口返回裸数组，不是 {list: [...]}。
+        """搜索歌曲，返回条目列表。
 
-        服务端的 song 分支每页固定 20 条，``limit`` 对它不生效；要拿到更多候选
-        必须加大 ``pages``。这里按需反推页数，再在本地截断到 limit。
+        响应形状随服务端版本而变，两种都由 ``_parse_search`` 归一：旧版
+        ``type=song`` 返回裸数组，新版返回 ``{list, total, allPage, fetchedPages,
+        hasMore}``。
+
+        分页语义也变过：旧版 ``type=song`` 每页固定 20 条，靠 ``pages`` 多取几页；
+        新版只要带了 ``limit`` 就只取「第 ``page`` 页、每页 min(limit, 平台单页上限)」，
+        ``pages`` 被完全忽略（平台单页上限：kw 200、tx 60、kg/bd 30、wy/mg 20）。
+        所以 ``limit`` 超过平台单页上限时，必须按 ``hasMore`` 自己往后翻页补齐，
+        否则配置的「搜索结果数」会静默缩水。``pages`` 仍照旧发送，兼容未升级的服务端。
 
         注意 **``singer`` 参数在服务端会被完全忽略**（只把 ``name`` 传给
         ``musicSearch.search``），所以要按歌手收窄结果必须自己拼进 ``name``。
@@ -275,34 +311,48 @@ class LxServerClient:
         if search_type == "song" and limit > 0:
             pages = max(int(pages), -(-limit // 20))
 
-        data = self._get(
-            "/api/music/search",
-            params={
-                "name": name,
-                "source": source,
-                "type": search_type,
-                "page": page,
-                "pages": pages,
-                "limit": limit,
-            },
-            timeout=timeout,
-        )
+        def fetch(page_no: int) -> Any:
+            return self._get(
+                "/api/music/search",
+                params={
+                    "name": name,
+                    "source": source,
+                    "type": search_type,
+                    "page": page_no,
+                    "pages": pages,
+                    "limit": limit,
+                },
+                timeout=timeout,
+            )
 
-        items: list[dict] = []
-        if isinstance(data, list):
-            items = [item for item in data if isinstance(item, dict)]
-        elif isinstance(data, dict):
-            for key in ("list", "data", "songs", "result"):
-                value = data.get(key)
-                if isinstance(value, list):
-                    items = [item for item in value if isinstance(item, dict)]
-                    break
-        else:
-            logger.warn(f"搜索响应结构无法识别：{str(data)[:200]}")
-            return []
+        items, has_more = self._parse_search(fetch(page), source)
 
-        # 服务端并不严格按 limit 截断（实测请求 limit=5 仍返回 20 条），
-        # 这里补一次本地截断，保证插件的「搜索结果数」配置真正生效。
+        # 一页就够时（旧服务端、或 limit 未超过平台单页上限）不会进入这个循环。
+        # 最多补 10 页：limit 上限 50、平台单页最少 20 条，3 页即可覆盖，留足余量
+        # 同时防止服务端 hasMore 恒真时无限翻页。
+        current = page
+        for _ in range(10):
+            if not has_more or limit <= 0 or len(items) >= limit:
+                break
+            current += 1
+            try:
+                page_items, has_more = self._parse_search(fetch(current), source)
+            except LxServerError as err:
+                # 已经拿到手的结果仍然可用，翻页失败不该让整次搜索失败
+                logger.warn(f"搜索补齐第 {current} 页失败，返回已有 {len(items)} 条：{err}")
+                break
+            if not page_items:
+                break
+            seen = {self._search_item_key(source, item) for item in items}
+            for item in page_items:
+                key = self._search_item_key(source, item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(item)
+
+        # 服务端并不严格按 limit 截断，这里补一次本地截断，
+        # 保证插件的「搜索结果数」配置真正生效。
         if limit and len(items) > limit:
             return items[:limit]
         return items

@@ -3,7 +3,7 @@
     "name": "LX 音源下载",
     "description": "调用自建 LX Sync Server，搜索歌曲、浏览歌单并下载到自定义目录。",
     "labels": "音乐,下载,歌单,LX音源",
-    "version": "3.5.0",
+    "version": "3.5.1",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/lxmusicdownloader.png",
     "plugin_readme": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/plugins.v3/lxmusicdownloader/README.md",
     "author": "157888390",
@@ -11,6 +11,7 @@
     "release": true,
     "system_version": ">=3.0.3",
     "history": {
+      "v3.5.1": "适配 lxserver 新版搜索分页，修复结果数不足",
       "v3.5.0": "新增下载后独立整理到音乐库",
       "v3.4.1": "专辑详情补出封面，专辑视图不再缺图",
       "v3.4.0": "歌词独立开关：下载歌词文件 / 嵌入 USLT 标签",
