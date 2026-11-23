@@ -287,7 +287,7 @@ class StrmScraper(_PluginBase):
         "/main/icons/strmscraper.png"
     )
     # 插件版本（V3 专用：本轮移除侧栏入口、新增音乐类型识别、规范化并发与缓存）
-    plugin_version = "3.3.7"
+    plugin_version = "3.3.8"
     # 插件作者
     plugin_author = "157888390"
     # 作者主页
@@ -1381,7 +1381,11 @@ class StrmScraper(_PluginBase):
             active = self._queue + ([self._current] if self._current else [])
             for raw in items:
                 kind = str(raw.get("kind") or "dir")
-                target = str(raw.get("target") or "").strip()
+                # 目录名可能自带首尾空格（115 上确有「… [tmdbid=1599184] 」这种，OneStrm 原样沿用），
+                # 用 strip() 会把名字抹平：local 查不到 → 兜底遍历远端存储 → 落到不可用的服务上。
+                # 只清换行/制表符这类控制字符，真实空格原样保留；纯空白仍视为空值。
+                raw_target = str(raw.get("target") or "")
+                target = raw_target.strip("\r\n\t\v\f") if raw_target.strip() else ""
                 key = str(raw.get("key") or f"{kind}:{target}")
                 origin = str(raw.get("origin") or "")
                 # 展开来源的扫描已被取消（"*" 或其 scan 签名命中）→ 直接丢弃，
