@@ -11,11 +11,14 @@ MoviePilot 第三方插件仓库，按 [仓库与发布指南](./docs/Repository
 |---------|------|------|------|
 | `LxMusicDownloader` | LX 音源下载 | 3.5.1 | [`plugins.v3/lxmusicdownloader/`](./plugins.v3/lxmusicdownloader/) |
 | `StrmScraper` | STRM监控刮削 | 3.3.8 | [`plugins.v3/strmscraper/`](./plugins.v3/strmscraper/) |
+| `PeerGuard` | 反吸血守卫 | 0.1.0 | [`plugins.v3/peerguard/`](./plugins.v3/peerguard/) |
 
 - **LX 音源下载**：调用自建 LX Sync Server 的 HTTP API 完成歌曲搜索、歌单浏览与直链解析下载，
   提供 `/lx_search`、`/lx_download`、`/lx_playlist`、`/lx_stats` 远程命令，并内置 Vue 联邦界面。
 - **STRM监控刮削**：监控配置目录中新增的 `.strm` 文件，自动调用主程序刮削链
   （`ScrapingChain`）补齐元数据，界面按分类目录分组并支持按分类刷新。
+- **反吸血守卫**：轮询 qBittorrent 的 peer 列表，按 PeerID、客户端名与行为特征
+  （虚假进度 / 超量下载）封禁吸血客户端，是 PeerBanHelper 的裁剪版，不需要额外容器。
 
 ## 目录结构
 
@@ -23,6 +26,7 @@ MoviePilot 第三方插件仓库，按 [仓库与发布指南](./docs/Repository
 MoviePilot-Plugins/
 ├── plugins.v3/                 # V3 专用插件源码（一个插件一个目录）
 │   ├── lxmusicdownloader/      # 目录名 = 主类名 LxMusicDownloader 的小写
+│   ├── peerguard/              # 目录名 = 主类名 PeerGuard 的小写
 │   └── strmscraper/            # 目录名 = 主类名 StrmScraper 的小写
 ├── icons/                      # 插件图标，文件名与插件 ID 小写一致
 ├── package.v3.json             # V3 插件市场索引（键名 = 插件 ID）
