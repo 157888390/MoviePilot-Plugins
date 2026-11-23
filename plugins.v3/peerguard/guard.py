@@ -9,15 +9,20 @@
   - ``peer_id_client`` → 识别吸血客户端（qb 4.5+ 才提供）
   - ``client`` 名称 → 兜底识别
   - ``progress`` / ``downloaded`` / ``uploaded`` 的跨轮变化 → 识别虚假进度与超量下载
+
+另外接受来自 BTN 的云端数据（:class:`CloudRule` / :class:`IpMatcher`）：规则解析在
+:mod:`btn` 里做，这里只负责"怎么用"，所以本模块依然不 import 宿主。
 """
 
 from __future__ import annotations
 
+import bisect
 import ipaddress
+import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 # 默认 PeerID 前缀黑名单：都是国内常见的"只下不传"客户端。
 # 对照 PBH 的默认规则集，去掉了语义不明确的几项，只留确定是吸血客户端的。
@@ -69,6 +74,159 @@ class GuardConfig:
     leech_rounds: int = 5
     whitelist: List[str] = field(default_factory=list)
     max_ban_per_round: int = 20
+    # ---- BTN 云端数据（由 plugins 在刷新后注入，缺省即不启用）----
+    ban_btn_denylist: bool = True
+    ban_btn_rules: bool = True
+    denylist: Optional["IpMatcher"] = None
+    allowlist: Optional["IpMatcher"] = None
+    cloud_peer_id_rules: List["CloudRule"] = field(default_factory=list)
+    cloud_client_rules: List["CloudRule"] = field(default_factory=list)
+
+
+class IpMatcher:
+    """
+    IP / CIDR 集合，用二分查区间。
+
+    BTN 的拒绝名单一次上千条网段，逐条 ``addr in network`` 会在每个 peer 上
+    做上千次前缀比较；这里先 collapse 再折算成 ``[start, end]`` 区间数组，
+    单次判定退化为一次 bisect。
+
+    支持规范里的注释写法：整行 ``#`` / ``//`` 开头，或行尾 `` # 备注``。
+    """
+
+    __slots__ = ("count", "_v4_starts", "_v4_ends", "_v6_starts", "_v6_ends")
+
+    def __init__(self, lines: Optional[Iterable[str]] = None) -> None:
+        v4: List[ipaddress._BaseNetwork] = []
+        v6: List[ipaddress._BaseNetwork] = []
+        for raw in lines or []:
+            network = self._parse_line(raw)
+            if network is None:
+                continue
+            (v4 if network.version == 4 else v6).append(network)
+        self._v4_starts, self._v4_ends = self._pack(v4)
+        self._v6_starts, self._v6_ends = self._pack(v6)
+        self.count = len(v4) + len(v6)
+
+    @staticmethod
+    def _parse_line(raw: str) -> Optional[ipaddress._BaseNetwork]:
+        """解析一行，坏行进返回 None（名单里混进备注/空行是常态）。"""
+        text = (raw or "").strip()
+        if not text or text.startswith("#") or text.startswith("//"):
+            return None
+        for sep in (" #", " //", "\t#"):
+            if sep in text:
+                text = text.split(sep, 1)[0].strip()
+                break
+        if not text:
+            return None
+        try:
+            return ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _pack(
+        networks: List[ipaddress._BaseNetwork],
+    ) -> Tuple[List[int], List[int]]:
+        """合并相邻网段后压成两个平行的有序整数数组。"""
+        if not networks:
+            return [], []
+        spans = sorted(
+            (int(net.network_address), int(net.broadcast_address))
+            for net in ipaddress.collapse_addresses(networks)
+        )
+        return [s[0] for s in spans], [s[1] for s in spans]
+
+    def contains(self, addr: Union[str, ipaddress._BaseAddress]) -> bool:
+        """判断地址是否落在集合内；解析不出来的地址一律视为不命中。"""
+        if isinstance(addr, str):
+            try:
+                addr = ipaddress.ip_address(addr)
+            except ValueError:
+                return False
+        starts, ends = (
+            (self._v4_starts, self._v4_ends)
+            if addr.version == 4
+            else (self._v6_starts, self._v6_ends)
+        )
+        if not starts:
+            return False
+        key = int(addr)
+        index = bisect.bisect_right(starts, key) - 1
+        return index >= 0 and key <= ends[index]
+
+    def __len__(self) -> int:
+        return self.count
+
+
+@dataclass(frozen=True)
+class CloudRule:
+    """
+    BTN 云端规则的一条（``rule_peer_identity`` 下发）。
+
+    在线格式是 ``{"method": "STARTS_WITH", "content": "-xl"}`` 的 JSON 字符串，
+    也兼容直接给裸字符串（按 CONTAINS 处理）。文本比较一律忽略大小写 ——
+    qb 报上来的客户端名大小写不固定，PBH 的规则也是按忽略大小写写的。
+    """
+
+    module: str
+    method: str
+    content: str
+    pattern: Optional[re.Pattern] = None
+
+    _METHODS = ("STARTS_WITH", "ENDS_WITH", "CONTAINS", "EQUALS", "REGEX", "LENGTH")
+
+    @classmethod
+    def parse(cls, raw: Any, module: str = "") -> Optional["CloudRule"]:
+        """把一条线上规则解析成对象；无法理解的可选规则直接丢弃。"""
+        obj = raw
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            try:
+                obj = json.loads(text)
+            except ValueError:
+                obj = {"method": "CONTAINS", "content": text}
+        if isinstance(obj, (int, float)):
+            obj = {"method": "CONTAINS", "content": str(obj)}
+        if not isinstance(obj, dict):
+            return None
+        method = str(obj.get("method") or "CONTAINS").strip().upper().replace("-", "_")
+        content = str(obj.get("content") or "").strip()
+        if not content:
+            return None
+        if method not in cls._METHODS:
+            method = "CONTAINS"
+        pattern: Optional[re.Pattern] = None
+        if method == "REGEX":
+            try:
+                pattern = re.compile(content, re.IGNORECASE)
+            except re.error:
+                return None
+        return cls(module=str(module or ""), method=method, content=content, pattern=pattern)
+
+    def match(self, value: str) -> bool:
+        """按规则方法匹配一个值（peer_id 或客户端名）。"""
+        if not value:
+            return False
+        if self.method == "REGEX":
+            return bool(self.pattern and self.pattern.search(value))
+        if self.method == "LENGTH":
+            try:
+                return len(value) == int(self.content)
+            except ValueError:
+                return False
+        left = value.casefold()
+        right = self.content.casefold()
+        if self.method == "EQUALS":
+            return left == right
+        if self.method == "STARTS_WITH":
+            return left.startswith(right)
+        if self.method == "ENDS_WITH":
+            return left.endswith(right)
+        return right in left  # CONTAINS
 
 
 @dataclass
@@ -140,6 +298,29 @@ class RuleEngine:
         """清空基线（插件停用或切换下载器时调用）。"""
         self._baseline.clear()
 
+    def apply_cloud(
+        self,
+        *,
+        denylist: Optional[IpMatcher] = None,
+        allowlist: Optional[IpMatcher] = None,
+        peer_id_rules: Optional[List[CloudRule]] = None,
+        client_rules: Optional[List[CloudRule]] = None,
+    ) -> None:
+        """
+        换一批 BTN 云端规则。
+
+        不重建引擎 —— 重建会丢掉 :class:`PeerBaseline`，让"连续 N 轮"这类
+        行为规则从头数起。规则更新与行为判定互不相干，各换各的。
+        """
+        if denylist is not None:
+            self.config.denylist = denylist
+        if allowlist is not None:
+            self.config.allowlist = allowlist
+        if peer_id_rules is not None:
+            self.config.cloud_peer_id_rules = peer_id_rules
+        if client_rules is not None:
+            self.config.cloud_client_rules = client_rules
+
     def prune(self, alive: Set[str], max_keep: int = 20000) -> None:
         """
         丢弃本轮没出现的 peer 基线，避免长跑后字典无限膨胀。
@@ -173,17 +354,23 @@ class RuleEngine:
         :return: 命中返回 :class:`Hit`，未命中返回 None
         """
         ip = str(peer.get("ip") or "")
-        if self._is_whitelisted(ip):
+        skip, hit = self._screen_ip(ip)
+        if skip or hit:
             self._baseline.pop(peer_key, None)
-            return None
+            return hit
 
         # 1) PeerID 前缀：最快也最准，伪装客户端改 client 名但很少改 peer_id
-        hit = self._match_peer_id(peer_id)
+        hit = self._match_peer_id(peer_id) or self._match_cloud(
+            self.config.cloud_peer_id_rules, peer_id, "peer_id", "PeerID"
+        )
         if hit:
             return hit
 
         # 2) 客户端名称
-        hit = self._match_client(str(peer.get("client") or ""))
+        client_name = str(peer.get("client") or "")
+        hit = self._match_client(client_name) or self._match_cloud(
+            self.config.cloud_client_rules, client_name, "client", "客户端名"
+        )
         if hit:
             return hit
 
@@ -224,17 +411,33 @@ class RuleEngine:
     # ------------------------------------------------------------------
     # 单条规则
     # ------------------------------------------------------------------
-    def _is_whitelisted(self, ip: str) -> bool:
-        """内网与自定义白名单一律跳过，避免把局域网设备封掉。"""
+    def _screen_ip(self, ip: str) -> Tuple[bool, Optional[Hit]]:
+        """
+        先过一遍 IP 层：放行还是命中云端拒绝名单。
+
+        顺序即优先级：内网 → 本地白名单 → BTN 允许名单 → BTN 拒绝名单。
+        BTN 的允许名单里是别人登记过的盒子/公益站点，排在内网之后、拒绝名单之前，
+        与 PBH 的语义一致（允许名单的用途正是"纠正被误判的 IP"）。
+
+        :return: ``(是否放行, 命中)``，两者互斥
+        """
         if not ip:
-            return True
+            return True, None
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
-            return True  # IP 解析不出来，宁可不判
+            return True, None  # IP 解析不出来，宁可不判
         if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return True
-        return any(addr in net for net in self._networks)
+            return True, None
+        if any(addr in net for net in self._networks):
+            return True, None
+        allow = self.config.allowlist
+        if allow is not None and allow.contains(addr):
+            return True, None
+        deny = self.config.denylist
+        if self.config.ban_btn_denylist and deny is not None and deny.contains(addr):
+            return False, Hit("btn_ip", f"命中 BTN 云端 IP 黑名单（{ip}）")
+        return False, None
 
     def _match_peer_id(self, peer_id: str) -> Optional[Hit]:
         """按前缀匹配 peer_id。"""
@@ -254,6 +457,24 @@ class RuleEngine:
         for pattern in self._client_res:
             if pattern.search(client):
                 return Hit("client", f"客户端名命中黑名单 {pattern.pattern}（{client}）")
+        return None
+
+    def _match_cloud(
+        self,
+        rules: List[CloudRule],
+        value: str,
+        kind: str,
+        label: str,
+    ) -> Optional[Hit]:
+        """按 BTN 云端规则匹配；``kind`` 只用于区分命中原因码。"""
+        if not self.config.ban_btn_rules or not value or not rules:
+            return None
+        for rule in rules:
+            if rule.match(value):
+                return Hit(
+                    f"btn_{kind}",
+                    f"命中 BTN 云端规则「{rule.module}」（{label} {value}）",
+                )
         return None
 
     def _check_fake_progress(

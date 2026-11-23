@@ -62,7 +62,7 @@
     "name": "反吸血守卫",
     "description": "轮询 qBittorrent 的 peer 列表，按 PeerID、客户端名与行为特征封禁迅雷等吸血客户端。",
     "labels": "反吸血,qBittorrent,PT",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/peerguard.png",
     "plugin_readme": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/plugins.v3/peerguard/README.md",
     "author": "157888390",
@@ -70,6 +70,7 @@
     "release": true,
     "system_version": ">=3.0.3",
     "history": {
+      "v0.2.0": "新增 BTN 云端规则与可选回传",
       "v0.1.0": "首个版本：PeerID/客户端名/行为三类规则封禁吸血端"
     }
   }
