@@ -7,3 +7,7 @@ vite.config.js.timestamp-*.mjs
 # Python 运行期缓存
 __pycache__/
 *.py[cod]
+
+# 本地预览海报缓存
+.preview/
+vite.preview.config.js.timestamp-*.mjs

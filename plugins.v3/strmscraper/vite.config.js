@@ -21,26 +21,49 @@ export default defineConfig({
       format: 'esm',
     }),
   ],
-  build: { target: 'esnext', minify: false, cssCodeSplit: true },
+  build: {
+    target: 'esnext',
+    minify: false,
+    cssCodeSplit: true,
+    rollupOptions: {
+      output: {
+        // 公共图标的 JS/CSS 块也必须满足宿主静态资产白名单。
+        chunkFileNames: (chunk) =>
+          chunk.name.startsWith('__federation_')
+            ? 'assets/[name]-[hash].js'
+            : 'assets/_plugin-vue_export-helper-[name]-[hash].js',
+        assetFileNames: (asset) =>
+          asset.name?.startsWith('__federation_')
+            ? 'assets/[name]-[hash][extname]'
+            : 'assets/_plugin-vue_export-helper-[name]-[hash][extname]',
+      },
+    },
+  },
   css: {
     postcss: {
       plugins: [
         {
           postcssPlugin: 'internal:charset-removal',
           AtRule: {
-            charset: atRule => atRule.remove(),
+            charset: (atRule) => atRule.remove(),
           },
         },
         {
           postcssPlugin: 'vuetify-filter',
           Root(root) {
             const sourcePath = root.source?.input?.file?.replaceAll('\\', '/') || ''
-            if (sourcePath.includes('/node_modules/vuetify/') || sourcePath.includes('/node_modules/@mdi/')) {
+            if (
+              sourcePath.includes('/node_modules/vuetify/') ||
+              sourcePath.includes('/node_modules/@mdi/')
+            ) {
               root.nodes = []
               return
             }
-            root.walkRules(rule => {
-              if (rule.selector && (rule.selector.includes('.v-') || rule.selector.includes('.mdi-'))) {
+            root.walkRules((rule) => {
+              if (
+                rule.selector &&
+                (rule.selector.includes('.v-') || rule.selector.includes('.mdi-'))
+              ) {
                 rule.remove()
               }
             })

@@ -1,9 +1,10 @@
 {
   "name": "moviepilot-strmscraper-plugin",
   "private": true,
-  "version": "3.3.8",
+  "version": "3.4.0",
   "type": "module",
   "scripts": {
+    "dev": "vite --config vite.preview.config.js",
     "build": "vite build && node --input-type=module -e \"import fs from 'node:fs';const p='dist/assets/remoteEntry.js';fs.writeFileSync(p,fs.readFileSync(p,'utf8').replace(/[ \\t]+$/gm,''))\""
   },
   "dependencies": {

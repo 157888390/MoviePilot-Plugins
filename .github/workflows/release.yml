@@ -60,11 +60,8 @@ jobs:
             work="$(mktemp -d)"
             cp -r "$dir"/. "$work"/
             rm -rf "$work/node_modules"
-            # 锁文件是本机（Windows）生成的，只记录了 win32 平台的 rollup/esbuild 原生依赖，
-            # 直接 npm install 在 Linux 会缺 @rollup/rollup-linux-x64-gnu。故删掉锁文件让 npm
-            # 按当前平台重新解析（仅作用于临时副本，仓库锁文件保持原样）。
-            rm -f "$work/package-lock.json"
-            (cd "$work" && npm install --no-audit --no-fund && npm run build)
+            # 按锁文件安装，避免构建工具升级导致产物哈希漂移；锁文件须包含跨平台原生依赖。
+            (cd "$work" && npm ci --no-audit --no-fund && npm run build)
             if ! diff -r -q "$dir/dist" "$work/dist"; then
               echo "::error:: $dir/dist 与源码重构建产物不一致，请重新构建并提交" >&2
               diff -r -q "$dir/dist" "$work/dist" || true

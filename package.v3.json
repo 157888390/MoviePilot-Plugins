@@ -23,7 +23,7 @@
     "name": "STRM监控刮削",
     "description": "监控目录中新增的.strm文件，自动调用主程序刮削链（ScrapingChain）补齐元数据（tvshow.nfo/海报等），界面按分类目录分组，支持按分类刷新，刮削记录落插件数据目录。V3 专用插件。",
     "labels": "刮削,STRM,监控",
-    "version": "3.3.8",
+    "version": "3.4.0",
     "icon": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/icons/strmscraper.png",
     "plugin_readme": "https://raw.githubusercontent.com/157888390/MoviePilot-Plugins/main/plugins.v3/strmscraper/README.md",
     "author": "157888390",
@@ -31,6 +31,7 @@
     "release": true,
     "system_version": ">=3.0.3",
     "history": {
+      "v3.4.0": "重构媒体库与配置界面，修复刮削状态和海报自动刷新",
       "v3.3.8": "修复目录名带首尾空格导致刮削一直跳过",
       "v3.3.7": "修复重载并发刮削、取消失效与海报越界读取；数据文件改原子写",
       "v3.3.6": "手动刮削按钮默认覆盖元数据，与宿主原生一致",

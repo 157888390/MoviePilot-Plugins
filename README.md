@@ -10,7 +10,7 @@ MoviePilot 第三方插件仓库，按 [仓库与发布指南](./docs/Repository
 | 插件 ID | 名称 | 版本 | 目录 |
 |---------|------|------|------|
 | `LxMusicDownloader` | LX 音源下载 | 3.5.1 | [`plugins.v3/lxmusicdownloader/`](./plugins.v3/lxmusicdownloader/) |
-| `StrmScraper` | STRM监控刮削 | 3.3.8 | [`plugins.v3/strmscraper/`](./plugins.v3/strmscraper/) |
+| `StrmScraper` | STRM监控刮削 | 3.4.0 | [`plugins.v3/strmscraper/`](./plugins.v3/strmscraper/) |
 | `PeerGuard` | 反吸血守卫 | 0.2.0 | [`plugins.v3/peerguard/`](./plugins.v3/peerguard/) |
 
 - **LX 音源下载**：调用自建 LX Sync Server 的 HTTP API 完成歌曲搜索、歌单浏览与直链解析下载，

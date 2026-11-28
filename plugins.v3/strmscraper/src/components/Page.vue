@@ -4,10 +4,23 @@
 // 本组件收敛了原侧栏全页 AppPage 与精简详情页的全部能力：统计、海报墙、类型与二级分类
 // 筛选、搜索、单集/版本刮削、任务进度与刮削记录。宿主 PluginDataDialog 在 Vue 模式下只提供
 // 一个空 VCard，因此标题栏、关闭按钮与设置入口都由本组件自行渲染。
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import StrmIcon from './StrmIcon.vue'
 import {
-  coverUrl, errorLabel, formatDate, formatSize, formatTime, makeApiCall,
-  posterStyle, STATUS_LABELS, statusClass, statusOf, typeClass, typeLabel, unwrap, versionLabel,
+  coverUrl,
+  errorLabel,
+  formatDate,
+  formatSize,
+  formatTime,
+  makeApiCall,
+  posterStyle,
+  STATUS_LABELS,
+  statusClass,
+  statusOf,
+  typeClass,
+  typeLabel,
+  unwrap,
+  versionLabel,
 } from '../lib/strm.js'
 
 const props = defineProps({
@@ -46,6 +59,18 @@ const overview = ref({})
 const items = ref([])
 const categories = ref([])
 const keyword = ref('')
+const displayMode = ref('poster')
+const sortBy = ref('recent')
+const lastRefreshed = ref(null)
+const refreshedLabel = computed(() =>
+  lastRefreshed.value
+    ? new Intl.DateTimeFormat('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(lastRefreshed.value)
+    : '尚未刷新',
+)
 const typeFilter = ref('all')
 // 条目状态筛选：all / scraped / failed / skipped / pending（数字来自 overview.status）
 const statusFilter = ref('all')
@@ -53,6 +78,40 @@ const statusFilter = ref('all')
 const subFilters = ref([])
 // 队列面板：点顶部状态区展开，不单独开 Tab（F8）
 const queuePanelOpen = ref(false)
+const queuePanelEl = ref(null)
+let queueReturnFocus = null
+
+/** 抽屉打开后接管焦点，关闭时回到触发按钮。 */
+watch(queuePanelOpen, async (open) => {
+  if (open) {
+    queueReturnFocus = document.activeElement
+    scanMenu.value = false
+    await nextTick()
+    queuePanelEl.value?.querySelector('button')?.focus()
+  } else if (queueReturnFocus?.isConnected) {
+    await nextTick()
+    queueReturnFocus.focus()
+  }
+})
+
+/** 任务抽屉的键盘焦点始终留在当前对话框内。 */
+function trapQueueFocus(event) {
+  if (event.key !== 'Tab') return
+  const controls = [
+    ...(queuePanelEl.value?.querySelectorAll(
+      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), [tabindex="0"]',
+    ) || []),
+  ]
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+}
 
 const current = ref(null)
 const detail = ref(null)
@@ -66,12 +125,21 @@ const recordFilter = reactive({ success: '', type: '', category: '', since: '', 
 
 // 队列状态：界面唯一的「正在做什么」来源。文件监控触发的刮削与用户点出来的刮削
 // 都会出现在这里，因此不再需要「扫描进度」和「任务进度」两套互不相干的状态。
-const queue = ref({ running: null, queued: [], queued_total: 0, stats: {}, recent: [], busy: false })
+const queue = ref({
+  running: null,
+  queued: [],
+  queued_total: 0,
+  stats: {},
+  recent: [],
+  busy: false,
+})
 const busy = computed(() => Boolean(queue.value.busy))
 const scanMenu = ref(false)
 let queueTimer = null
 // 记录上一轮队列是否忙碌，用于识别「刚跑完」这一瞬间并触发清单重算
 let queueWasBusy = false
+let queueCompletionKey = null
+let disposed = false
 
 // 海报加载失败（无本地海报且 TMDB 未命中）时回退渐变占位图
 const posterFailed = reactive({})
@@ -83,17 +151,17 @@ function markPosterFailed(path) {
 
 const counts = computed(() => ({
   all: items.value.length,
-  movie: items.value.filter(item => item.type === 'movie').length,
-  tv: items.value.filter(item => item.type === 'tv').length,
-  music: items.value.filter(item => item.type === 'music').length,
+  movie: items.value.filter((item) => item.type === 'movie').length,
+  tv: items.value.filter((item) => item.type === 'tv').length,
+  music: items.value.filter((item) => item.type === 'music').length,
 }))
 
 // 状态过滤 chip：数字来自 overview.status，key 与 item.status 一一对应。
 // 按用户要求只保留「待刮削 / 已刮 / 失败」三项（去掉「跳过」与类型计数）。
 const STATUS_FILTERS = [
-  { key: 'pending', label: '待刮削' },
-  { key: 'scraped', label: '已刮' },
-  { key: 'failed', label: '失败' },
+  { key: 'scraped', label: '已刮削', icon: 'checkCircle', hint: '元数据与海报已就绪' },
+  { key: 'pending', label: '待刮削', icon: 'clock', hint: '等待补全媒体资料' },
+  { key: 'failed', label: '刮削失败', icon: 'alert', hint: '查看并重试失败项' },
 ]
 const statusCounts = computed(() => {
   const dist = overview.value.status || {}
@@ -109,7 +177,7 @@ const statusCounts = computed(() => {
 function isInQueue(path) {
   const running = queue.value.running
   if (running && running.target === path) return true
-  return (queue.value.queued || []).some(item => item.target === path)
+  return (queue.value.queued || []).some((item) => item.target === path)
 }
 
 /** 展示用状态：item.status 四态之上叠加「刮削中」。 */
@@ -177,7 +245,8 @@ function subLabel(item) {
 
 /** 卡片上的一句话文件摘要：剧集集数 / 曲目数 / 版本数。 */
 function fileSummary(item) {
-  if (item.type === 'tv') return `${item.total_episodes || item.total_files} 集 · ${(item.seasons || []).length} 季`
+  if (item.type === 'tv')
+    return `${item.total_episodes || item.total_files} 集 · ${(item.seasons || []).length} 季`
   if (item.type === 'music') return `${item.total_files} 首`
   if (item.multi_version) return `${item.total_files} 版本`
   return '单版本'
@@ -197,7 +266,7 @@ const typeChildren = computed(() => {
   if (type !== 'movie' && type !== 'tv') return []
   const children = []
   for (const group of categoryGroups.value) {
-    const subs = (group.children || []).filter(child => !child.loose && child[type])
+    const subs = (group.children || []).filter((child) => !child.loose && child[type])
     if (!subs.length) {
       if (!group[type]) continue
       children.push({
@@ -223,7 +292,7 @@ const typeChildren = computed(() => {
       })
     }
     // 散装在分类目录下、没进任何二级分类的媒体仍留「未分类」入口
-    const loose = (group.children || []).find(child => child.loose && child[type])
+    const loose = (group.children || []).find((child) => child.loose && child[type])
     if (loose) {
       children.push({
         ...loose,
@@ -235,18 +304,17 @@ const typeChildren = computed(() => {
     }
   }
   for (const child of children) {
-    const duplicated = children.filter(entry => entry.name === child.name).length > 1
-    child.label = duplicated && child.parentName
-      ? `${child.name} · ${child.parentName}`
-      : child.name
+    const duplicated = children.filter((entry) => entry.name === child.name).length > 1
+    child.label =
+      duplicated && child.parentName ? `${child.name} · ${child.parentName}` : child.name
   }
   return children
 })
 
 /** 当前选中的二级分类对象（多选）。 */
 const activeSubs = computed(() => {
-  const map = new Map(typeChildren.value.map(child => [child.key, child]))
-  return subFilters.value.map(key => map.get(key)).filter(Boolean)
+  const map = new Map(typeChildren.value.map((child) => [child.key, child]))
+  return subFilters.value.map((key) => map.get(key)).filter(Boolean)
 })
 
 /**
@@ -278,8 +346,8 @@ const sidebarGroups = computed(() => {
     if (!type) continue
     seen.add(type)
     const children = (group.children || [])
-      .filter(child => !child.loose && child[type])
-      .map(child => ({
+      .filter((child) => !child.loose && child[type])
+      .map((child) => ({
         ...child,
         type,
         parent: group.path,
@@ -287,7 +355,7 @@ const sidebarGroups = computed(() => {
         key: `${group.path}::${child.name}`,
         pending: pendingByCat.value[`${type}|${child.name}`] || 0,
       }))
-    const loose = (group.children || []).find(child => child.loose && child[type])
+    const loose = (group.children || []).find((child) => child.loose && child[type])
     groups.push({
       name: group.name,
       path: group.path,
@@ -298,41 +366,73 @@ const sidebarGroups = computed(() => {
       total: group.total,
       unscraped: group.unscraped,
       children,
-      loose: loose ? {
-        ...loose, type, parent: group.path, parentName: group.name, key: `${group.path}::${loose.name}`,
-      } : null,
+      loose: loose
+        ? {
+            ...loose,
+            type,
+            parent: group.path,
+            parentName: group.name,
+            key: `${group.path}::${loose.name}`,
+          }
+        : null,
     })
   }
   // 音乐兜底：有音乐但后端未产出分类组时，仍给一个类型入口
   if ((overview.value.music || 0) > 0 && !seen.has('music')) {
     groups.push({
-      name: '音乐', path: '', type: 'music',
-      movie: 0, tv: 0, music: overview.value.music || 0,
-      total: overview.value.music || 0, unscraped: 0, children: [], loose: null,
+      name: '音乐',
+      path: '',
+      type: 'music',
+      movie: 0,
+      tv: 0,
+      music: overview.value.music || 0,
+      total: overview.value.music || 0,
+      unscraped: 0,
+      children: [],
+      loose: null,
     })
   }
   return groups
 })
 
+/** 窄屏分类选择复用侧栏数据，保留所有分类入口。 */
+const mobileCategories = computed(() =>
+  sidebarGroups.value
+    .flatMap((group) =>
+      [...group.children, ...(group.loose ? [group.loose] : [])].map((child) => ({
+        ...child,
+        label: typeFilter.value === 'all' ? group.name + ' / ' + child.name : child.name,
+      })),
+    )
+    .filter((child) => typeFilter.value === 'all' || child.type === typeFilter.value),
+)
+
+/** 在窄屏选择分类，并切换到相应媒体类型。 */
+function selectMobileCategory(key) {
+  const child = mobileCategories.value.find((item) => item.key === key)
+  if (child) selectSubCat(child)
+  else subFilters.value = []
+}
+
 /** 右侧内容标题：当前选中分类名，无则回退类型名 / 全部媒体。 */
 const sectionTitle = computed(() => {
-  if (activeSubs.value.length) return activeSubs.value.map(sub => sub.label).join(' / ')
-  const tab = TYPE_TABS.find(item => item.key === typeFilter.value)
+  if (activeSubs.value.length) return activeSubs.value.map((sub) => sub.label).join(' / ')
+  const tab = TYPE_TABS.find((item) => item.key === typeFilter.value)
   return tab ? tab.label : '全部媒体'
 })
 
 const visibleItems = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   const subSet = new Set(subFilters.value)
-  const childMap = new Map(typeChildren.value.map(child => [child.key, child]))
-  return items.value.filter(item => {
+  const childMap = new Map(typeChildren.value.map((child) => [child.key, child]))
+  const result = items.value.filter((item) => {
     if (typeFilter.value !== 'all' && item.type !== typeFilter.value) return false
     if (statusFilter.value !== 'all' && displayStatus(item) !== statusFilter.value) return false
     if (subSet.size) {
       const keys = categoryKeysOf(item)
       const base = item.category_dir || item.root || ''
       const sub = subOf(item) || '未分类'
-      const matched = [...subSet].some(key => {
+      const matched = [...subSet].some((key) => {
         const child = childMap.get(key)
         if (!child) return false
         // 二级分类连同父分类一起比对，避免不同父分类下的同名分类互相串台；
@@ -345,6 +445,12 @@ const visibleItems = computed(() => {
     if (kw && !`${item.title} ${item.path}`.toLowerCase().includes(kw)) return false
     return true
   })
+  if (sortBy.value === 'title')
+    return result.sort((a, b) =>
+      String(a.title).localeCompare(String(b.title), 'zh-CN', { numeric: true }),
+    )
+  const field = sortBy.value === 'scraped' ? 'last_scrape' : 'last_file_change'
+  return result.sort((a, b) => Number(b[field] || 0) - Number(a[field] || 0))
 })
 
 const seasons = computed(() => {
@@ -365,17 +471,18 @@ const seasons = computed(() => {
 })
 
 const currentSeason = computed(
-  () => seasons.value.find(item => String(item.no) === seasonKey.value) || seasons.value[0] || null,
+  () =>
+    seasons.value.find((item) => String(item.no) === seasonKey.value) || seasons.value[0] || null,
 )
 
 const rows = computed(() => {
   if (!current.value) return []
   if (current.value.type === 'tv') return currentSeason.value?.files || []
   // 电影按版本列出，音乐按曲目列出；两者的数据形状一致（后端统一放在 versions 里）
-  return (detail.value?.files || []).map(file => ({ ...file, label: versionLabel(file.name) }))
+  return (detail.value?.files || []).map((file) => ({ ...file, label: versionLabel(file.name) }))
 })
 
-const selectedRows = computed(() => rows.value.filter(row => selected.value.has(row.path)))
+const selectedRows = computed(() => rows.value.filter((row) => selected.value.has(row.path)))
 
 /** 正在刮削的目标名：目录/文件取路径最后一段，扫描项直接用后端给的标签。 */
 const runningLabel = computed(() => {
@@ -403,18 +510,21 @@ function statusTagClass(status) {
 
 /** 侧边栏：切到「全部媒体」。 */
 function selectAllMedia() {
+  view.value = 'grid'
   typeFilter.value = 'all'
   subFilters.value = []
 }
 
 /** 侧边栏：只按类型筛选（全部电影 / 全部电视剧 / 全部音乐）。 */
 function selectTypeOnly(key) {
+  view.value = 'grid'
   typeFilter.value = key
   subFilters.value = []
 }
 
 /** 侧边栏：单选二级分类，再点一次取消。 */
 function selectSubCat(child) {
+  view.value = 'grid'
   typeFilter.value = child.type
   if (subFilters.value.includes(child.key)) subFilters.value = []
   else subFilters.value = [child.key]
@@ -448,6 +558,17 @@ async function loadAll(force = true, silent = false) {
     ])
     overview.value = unwrap(overviewResponse) || {}
     categories.value = unwrap(categoryResponse) || []
+    if (force) Object.keys(posterFailed).forEach((path) => delete posterFailed[path])
+    if (view.value === 'detail' && current.value) {
+      const updated = items.value.find((item) => item.path === current.value.path)
+      if (updated) {
+        current.value = updated
+        await loadDetailFiles(updated)
+      } else {
+        closeDetail()
+      }
+    }
+    lastRefreshed.value = new Date()
   } catch (loadError) {
     error.value = loadError?.message || '加载媒体清单失败'
   } finally {
@@ -482,11 +603,13 @@ async function runScan(overwrite, scoped = false) {
   notice.value = ''
   try {
     const query = subs.length
-      ? `?scope=category&paths=${encodeURIComponent(subs.map(sub => sub.path).join(','))}&overwrite=${overwrite}`
+      ? `?scope=category&paths=${encodeURIComponent(subs.map((sub) => sub.path).join(','))}&overwrite=${overwrite}`
       : `?overwrite=${overwrite}`
     const result = unwrap(await apiCall('get', `/scan${query}`))
     const label = overwrite ? '覆盖重刮' : '仅补缺失'
-    const where = subs.length ? `分类「${subs.map(sub => sub.label).join('、')}」` : '全部监控目录'
+    const where = subs.length
+      ? `分类「${subs.map((sub) => sub.label).join('、')}」`
+      : '全部监控目录'
     notice.value = result?.queued
       ? `已加入队列：${where} · ${label}`
       : `无需重复入队：${where} 的同类扫描已在队列中`
@@ -527,14 +650,26 @@ async function openDetail(item) {
   seasonKey.value = ''
   view.value = 'detail'
   try {
-    const response = await apiCall('get', `/files?path=${encodeURIComponent(item.path)}`)
-    detail.value = unwrap(response)
-    if (item.type === 'tv' && seasons.value.length) {
-      seasonKey.value = String(seasons.value[0].no)
-    }
+    await loadDetailFiles(item, true)
   } catch (detailError) {
     error.value = detailError?.message || '读取文件明细失败'
   }
+}
+
+/** 刷新打开的详情，保留仍然有效的季与文件选择。 */
+async function loadDetailFiles(item, resetSeason = false) {
+  const response = await apiCall('get', `/files?path=${encodeURIComponent(item.path)}`)
+  if (view.value !== 'detail' || current.value?.path !== item.path) return
+  detail.value = unwrap(response)
+  if (
+    item.type === 'tv' &&
+    seasons.value.length &&
+    (resetSeason || !seasons.value.some((season) => String(season.no) === seasonKey.value))
+  ) {
+    seasonKey.value = String(seasons.value[0].no)
+  }
+  const paths = new Set((detail.value?.files || []).map((file) => file.path))
+  selected.value = new Set([...selected.value].filter((path) => paths.has(path)))
 }
 
 /** 关闭详情并回到海报墙。 */
@@ -559,11 +694,11 @@ function toggleRow(path) {
 }
 
 function selectAll() {
-  selected.value = new Set(rows.value.map(row => row.path))
+  selected.value = new Set(rows.value.map((row) => row.path))
 }
 
 function selectUnscraped() {
-  selected.value = new Set(rows.value.filter(row => !row.scraped).map(row => row.path))
+  selected.value = new Set(rows.value.filter((row) => !row.scraped).map((row) => row.path))
 }
 
 function clearSelection() {
@@ -578,10 +713,19 @@ function clearSelection() {
 async function loadQueue() {
   try {
     const data = unwrap(await apiCall('get', '/queue'))
-    if (data) queue.value = data
+    if (data) {
+      queue.value = data
+      queueWasBusy = queueWasBusy || Boolean(data.busy)
+    }
   } catch (queueError) {
     // 轮询类请求失败不弹错，下一轮自动重试
   }
+}
+
+/** 完成计数也能识别两次轮询之间已经结束的短任务。 */
+function completionKey(data) {
+  const stats = data.stats || {}
+  return [stats.done || 0, stats.failed || 0, stats.canceled || 0, data.recent?.[0]?.time || 0].join(':')
 }
 
 /**
@@ -596,8 +740,11 @@ async function pollQueue() {
     const data = unwrap(await apiCall('get', '/queue'))
     if (data) queue.value = data
     const nowBusy = Boolean(queue.value.busy)
-    if (queueWasBusy && !nowBusy) {
-      // worker 刚清空：被改动的目录要重算清单与统计，但不要闪整页 loading
+    const nextCompletionKey = completionKey(queue.value)
+    const completed = queueCompletionKey !== null && queueCompletionKey !== nextCompletionKey
+    queueCompletionKey = nextCompletionKey
+    if ((queueWasBusy && !nowBusy) || completed) {
+      // 重算清单、详情与统计；短任务也通过完成快照触发刷新。
       await loadAll(true, true)
       if (view.value === 'records') await loadRecords()
     }
@@ -605,11 +752,12 @@ async function pollQueue() {
   } catch (pollError) {
     // 忽略单次轮询失败，下一轮继续
   }
-  queueTimer = setTimeout(pollQueue, queue.value.busy ? POLL_BUSY_MS : POLL_IDLE_MS)
+  if (!disposed) queueTimer = setTimeout(pollQueue, queue.value.busy ? POLL_BUSY_MS : POLL_IDLE_MS)
 }
 
 /** 启动常驻队列轮询（幂等）：重复调用不会叠出两条循环。 */
 function startQueuePolling() {
+  if (disposed) return
   clearTimeout(queueTimer)
   queueWasBusy = Boolean(queue.value.busy)
   pollQueue()
@@ -640,7 +788,10 @@ async function postScrape(paths, target) {
 }
 
 function scrapeSelected() {
-  postScrape(selectedRows.value.map(row => row.path), 'file')
+  postScrape(
+    selectedRows.value.map((row) => row.path),
+    'file',
+  )
 }
 
 function scrapeWhole() {
@@ -697,7 +848,13 @@ const recordCategories = computed(() => {
 
 /** 是否已设任何记录筛选（决定「重置」按钮是否显示）。 */
 const hasRecordFilter = computed(() =>
-  Boolean(recordFilter.success || recordFilter.type || recordFilter.category || recordFilter.since || recordFilter.until),
+  Boolean(
+    recordFilter.success ||
+      recordFilter.type ||
+      recordFilter.category ||
+      recordFilter.since ||
+      recordFilter.until,
+  ),
 )
 
 /** 清空记录筛选并重新拉取。 */
@@ -752,11 +909,11 @@ function syncRootHeight() {
   const el = rootEl.value
   if (!el) return
   const height = Math.floor(window.innerHeight - el.getBoundingClientRect().top)
-  if (height > 320) el.style.setProperty('--strm-h', `${height}px`)
+  if (height > 320) el.style.setProperty('--strm-h', `${Math.max(320, height - 20)}px`)
   else el.style.removeProperty('--strm-h')
 }
 
-onMounted(() => {
+onMounted(async () => {
   // 详情弹窗默认 80rem，海报墙需要更宽的可视区
   emit('layout', { maxWidth: '96rem' })
   syncRootHeight()
@@ -764,207 +921,402 @@ onMounted(() => {
   setTimeout(syncRootHeight, 350)
   window.addEventListener('resize', syncRootHeight)
   loadAll(true)
-  loadQueue()
+  await loadQueue()
   startQueuePolling()
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   clearTimeout(queueTimer)
   window.removeEventListener('resize', syncRootHeight)
 })
+/** Escape 关闭当前浮层。 */
+function closeOverlays() {
+  queuePanelOpen.value = false
+  scanMenu.value = false
+}
 </script>
 
 <template>
-  <div ref="rootEl" class="strm">
-    <header class="strm-head">
-      <div class="strm-logo">S</div>
-      <div class="strm-heading">
-        <div class="strm-crumb">STRM 监控刮削<template v-if="view !== 'records'"> / <b>{{ sectionTitle }}</b></template></div>
-        <h1>{{ view === 'records' ? '刮削记录' : (view === 'detail' ? '媒体详情' : '媒体库') }}</h1>
+  <div ref="rootEl" class="strm" @keydown.esc="closeOverlays">
+    <aside class="strm-side" :inert="queuePanelOpen || undefined">
+      <div class="strm-brand">
+        <span class="strm-logo"><StrmIcon name="library" :size="23" /></span>
+        <div>
+          <strong>
+            STRM
+            <span>Scraper</span>
+          </strong>
+          <small>让每一份收藏，都有封面。</small>
+        </div>
       </div>
-      <div class="strm-seg">
-        <button :class="['strm-seg-item', view !== 'records' && 'active']" @click="switchView('grid')">媒体库</button>
-        <button :class="['strm-seg-item', view === 'records' && 'active']" @click="switchView('records')">刮削记录</button>
-      </div>
-      <div class="strm-head-chips">
-        <span :class="['strm-chip', overview.monitoring ? 'is-ok' : 'is-muted']">
-          <i class="strm-chip-dot"></i>{{ overview.monitoring ? '监控运行中' : '监控未启动' }}
+      <div class="strm-workspace">
+        <span class="strm-workspace-mark"><StrmIcon name="folder" :size="17" /></span>
+        <span>
+          我的媒体空间
+          <small>STRM 媒体管理</small>
         </span>
-        <!-- 队列状态 chip：可点击展开队列面板（F8），不再单独开 Tab -->
-        <button :class="['strm-chip', 'is-queue', busy && 'is-busy']" @click="queuePanelOpen = !queuePanelOpen">
-          <template v-if="busy">队列处理中 · 排队 {{ queue.queued_total || 0 }}</template>
-          <template v-else>队列空闲</template>
-        </button>
+        <span class="strm-online-dot" :class="{ off: !overview.monitoring }"></span>
       </div>
-      <div class="strm-head-actions">
-        <button v-if="props.show_switch" class="strm-btn ghost" @click="openSettings">设置</button>
-        <button class="strm-btn ghost" :disabled="loading || busy" @click="refreshAll">刷新</button>
-        <!-- 全量扫描的唯一入口：是否覆盖交给下拉选，避免「全量扫描 / 强制全量」两个按钮
-             只差一个布尔值却并排出现，用户极易点错并触发全库重刮 -->
-        <div class="strm-scan" @mouseleave="scanMenu = false">
-          <button class="strm-btn" :disabled="busy" @click="scanMenu = !scanMenu">
-            全量扫描 <span :class="['strm-caret', scanMenu && 'is-open']">▼</span>
+      <div class="strm-side-label">媒体管理</div>
+      <nav class="strm-side-nav" aria-label="媒体导航">
+        <button
+          :class="[
+            'strm-sopt',
+            view !== 'records' && typeFilter === 'all' && !subFilters.length && 'on',
+          ]"
+          @click="selectAllMedia"
+        >
+          <StrmIcon name="library" :size="18" />
+          <span>全部媒体</span>
+          <em>{{ counts.all }}</em>
+        </button>
+        <button
+          v-for="type in TYPE_TABS.slice(1)"
+          :key="type.key"
+          :class="[
+            'strm-sopt',
+            view !== 'records' && typeFilter === type.key && !subFilters.length && 'on',
+          ]"
+          @click="selectTypeOnly(type.key)"
+        >
+          <StrmIcon
+            :name="type.key === 'movie' ? 'film' : type.key === 'tv' ? 'tv' : 'music'"
+            :size="18"
+          />
+          <span>{{ type.label }}</span>
+          <em>{{ counts[type.key] }}</em>
+        </button>
+        <button :class="['strm-sopt', view === 'records' && 'on']" @click="switchView('records')">
+          <StrmIcon name="history" :size="18" />
+          <span>刮削记录</span>
+          <StrmIcon name="chevron" :size="14" class="strm-nav-arrow" />
+        </button>
+      </nav>
+      <div class="strm-side-divider"></div>
+      <div class="strm-side-label">
+        媒体分类
+        <span>{{ sidebarGroups.reduce((sum, group) => sum + group.children.length, 0) }}</span>
+      </div>
+      <nav class="strm-category-nav" aria-label="分类筛选">
+        <template v-for="group in sidebarGroups" :key="group.path || group.name">
+          <div v-if="group.children.length || group.loose" class="strm-sgroup">
+            {{ group.name }}
+          </div>
+          <button
+            v-for="child in group.children"
+            :key="child.key"
+            :class="[
+              'strm-sopt',
+              'is-child',
+              view === 'grid' &&
+                typeFilter === group.type &&
+                subFilters.includes(child.key) &&
+                'on',
+            ]"
+            @click="selectSubCat(child)"
+          >
+            <i class="strm-category-dot" :class="group.type"></i>
+            <span>{{ child.name }}</span>
+            <em>{{ child[group.type] || 0 }}</em>
+            <b v-if="child.pending" :title="child.pending + ' 项待刮削'">{{ child.pending }}</b>
           </button>
-          <div v-show="scanMenu" class="strm-scan-menu">
-            <button @click="runScan(false)">
-              <b>仅补缺失</b><em>跳过已有元数据，只刮未刮的</em>
-            </button>
-            <button @click="runScan(true)">
-              <b>覆盖重刮</b><em>重下全部 NFO 与图片</em>
-            </button>
-            <button @click="runScopedScan('incremental')">
-              <b>增量扫描</b><em>只补新增与未刮的目录</em>
-            </button>
-            <button @click="runScopedScan('unscraped')">
-              <b>补漏扫描</b><em>只刮状态非「已刮」的目录</em>
-            </button>
-            <template v-if="activeSubs.length">
-              <div class="strm-scan-sep">仅分类「{{ activeSubs.map(sub => sub.label).join('、') }}」</div>
-              <button @click="runScan(false, true)"><b>仅补缺失</b></button>
-              <button @click="runScan(true, true)"><b>覆盖重刮</b></button>
-            </template>
+          <button
+            v-if="group.loose"
+            :class="['strm-sopt', 'is-child', subFilters.includes(group.loose.key) && 'on']"
+            @click="selectSubCat(group.loose)"
+          >
+            <i class="strm-category-dot"></i>
+            <span>{{ group.loose.name }}</span>
+            <em>{{ group.loose[group.type] || 0 }}</em>
+          </button>
+        </template>
+        <p v-if="!sidebarGroups.length" class="strm-side-empty">扫描后显示媒体分类</p>
+      </nav>
+      <div class="strm-side-bottom">
+        <div class="strm-monitor-card">
+          <span class="strm-monitor-icon"><StrmIcon name="activity" :size="18" /></span>
+          <div>
+            <b>{{ overview.monitoring ? '目录监控已开启' : '目录监控未开启' }}</b>
+            <small>
+              {{
+                overview.monitoring
+                  ? '新文件会自动加入刮削队列'
+                  : overview.monitor_dirs?.length
+                    ? '已配置目录，可手动刷新与刮削'
+                    : '前往设置配置监控目录'
+              }}
+            </small>
           </div>
+          <i :class="['strm-online-dot', !overview.monitoring && 'off']"></i>
         </div>
-        <button class="strm-close" title="关闭" @click="emit('close')">×</button>
-      </div>
-    </header>
-
-    <div :class="['strm-body', view === 'grid' && 'is-grid']">
-      <div v-if="error" class="strm-alert is-error">
-        <span>{{ error }}</span>
-        <button class="strm-mini" @click="error = ''">知道了</button>
-      </div>
-      <div v-else-if="notice" class="strm-alert is-ok">
-        <span>{{ notice }}</span>
-        <button class="strm-mini" @click="notice = ''">知道了</button>
-      </div>
-
-      <!-- F8 队列面板：唯一反映「后台正在干什么」的地方。文件监控自动触发的刮削与
-           用户点出来的刮削都在这里，点顶部队列 chip 或此状态行展开/收起详情 -->
-      <div :class="['strm-queue', queuePanelOpen && 'is-open']">
-        <button class="strm-queue-bar" @click="queuePanelOpen = !queuePanelOpen">
-          <span :class="['strm-queue-state', busy ? 'is-busy' : 'is-idle']"></span>
-          <span class="strm-task-text">
-            <template v-if="busy">
-              <template v-if="queue.running && queue.running.kind === 'scan'">
-                正在枚举 {{ queueTargetLabel(queue.running) }}
-              </template>
-              <template v-else-if="queue.running">正在刮削 {{ runningLabel }}</template>
-              <template v-else>等待队列调度</template>
-              <template v-if="queue.queued_total"> · 排队 {{ queue.queued_total }}</template>
-            </template>
-            <template v-else>队列空闲</template>
-          </span>
-          <span :class="['strm-task-bar', busy && 'is-live']"><i></i></span>
-          <span :class="['strm-caret', queuePanelOpen && 'is-open']">▼</span>
+        <button v-if="props.show_switch" class="strm-sopt strm-settings" @click="openSettings">
+          <StrmIcon name="settings" :size="18" />
+          <span>插件设置</span>
+          <span class="strm-settings-arrow">↗</span>
         </button>
-
-        <div v-if="queuePanelOpen" class="strm-queue-panel">
-          <!-- 统计胶囊行：与顶部三卡片同一语言（彩色圆点 + 等宽数字） -->
-          <div class="strm-queue-stats">
-            <div class="strm-queue-stat is-ok"><i></i><b>{{ queue.stats.done || 0 }}</b><span>成功</span></div>
-            <div class="strm-queue-stat is-fail"><i></i><b>{{ queue.stats.failed || 0 }}</b><span>失败</span></div>
-            <div class="strm-queue-stat is-cancel"><i></i><b>{{ queue.stats.canceled || 0 }}</b><span>已取消</span></div>
-            <div class="strm-queue-stat is-pend"><i></i><b>{{ queue.queued_total || 0 }}</b><span>排队</span></div>
-          </div>
-
-          <div v-if="queue.running" class="strm-queue-sec">
-            <span class="strm-queue-sec-title">正在执行</span>
-            <div class="strm-queue-item is-busy">
-              <span class="strm-queue-dot is-busy"></span>
-              <span class="strm-queue-target">{{ queueTargetLabel(queue.running) }}</span>
-              <span class="strm-queue-kind">{{ kindLabel(queue.running.kind) }}</span>
-            </div>
-          </div>
-
-          <div v-if="queue.queued && queue.queued.length" class="strm-queue-sec">
-            <span class="strm-queue-sec-title">排队中（{{ queue.queued_total }}）</span>
-            <div v-for="item in queue.queued" :key="item.key" class="strm-queue-item">
-              <span class="strm-queue-dot is-pend"></span>
-              <span class="strm-queue-target">{{ queueTargetLabel(item) }}</span>
-              <span class="strm-queue-kind">{{ kindLabel(item.kind) }}</span>
-              <button class="strm-mini" @click="cancelQueue(item.target)">取消</button>
-            </div>
-          </div>
-
-          <div v-if="queue.recent && queue.recent.length" class="strm-queue-sec">
-            <span class="strm-queue-sec-title">最近完成</span>
-            <div v-for="(item, index) in queue.recent.slice(0, 6)" :key="`${item.time}-${index}`" class="strm-queue-item">
-              <span :class="['strm-queue-dot', item.success ? 'is-ok' : 'is-fail']"></span>
-              <span class="strm-queue-target">{{ queueTargetLabel(item) }}</span>
-              <span v-if="!item.success" class="strm-queue-err" :title="item.message">{{ item.message }}</span>
-            </div>
-          </div>
-
-          <div class="strm-queue-actions">
-            <button class="strm-btn small ghost" :disabled="!statusCounts.failed" @click="retryFailed">
-              重试失败项（{{ statusCounts.failed }}）
-            </button>
-            <button class="strm-btn small ghost" :disabled="!busy" @click="cancelQueue()">取消全部</button>
-          </div>
+        <div class="strm-side-caption">
+          STRM SCRAPER
+          <span>MoviePilot 插件</span>
         </div>
       </div>
+    </aside>
 
-      <!-- ============================ 媒体库 ============================ -->
-      <template v-if="view === 'grid'">
-        <div class="strm-grid-wrap">
-          <!-- 左侧固定分类侧边栏：全部媒体 + 各类型分组 + 二级分类（单选） -->
-          <aside class="strm-side">
-            <div class="strm-side-head">分类筛选</div>
-            <nav class="strm-side-nav">
-              <button :class="['strm-sopt', typeFilter === 'all' && !subFilters.length && 'on']" @click="selectAllMedia">
-                <span>全部媒体</span><em>{{ overview.total || 0 }}</em>
+    <main class="strm-main" :inert="queuePanelOpen || undefined">
+      <header class="strm-head">
+        <div class="strm-crumb">
+          <StrmIcon name="folder" :size="16" />
+          <span>我的媒体空间</span>
+          <span class="strm-crumb-slash">/</span>
+          <b>{{ view === 'records' ? '刮削记录' : view === 'detail' ? '媒体详情' : '媒体库' }}</b>
+        </div>
+        <div class="strm-head-actions">
+          <span :class="['strm-monitor-badge', !overview.monitoring && 'is-muted']">
+            <i class="strm-online-dot" :class="{ off: !overview.monitoring }"></i>
+            {{ overview.monitoring ? '监控运行中' : '监控已暂停' }}
+          </span>
+          <button
+            :class="['strm-queue-trigger', busy && 'is-busy']"
+            :aria-expanded="queuePanelOpen"
+            @click="queuePanelOpen = !queuePanelOpen"
+          >
+            <StrmIcon name="queue" :size="18" />
+            <span>任务队列</span>
+            <b v-if="busy">{{ (queue.queued_total || 0) + (queue.running ? 1 : 0) }}</b>
+          </button>
+          <span class="strm-head-divider"></span>
+          <button
+            v-if="props.show_switch"
+            class="strm-icon-btn"
+            title="插件设置"
+            aria-label="插件设置"
+            @click="openSettings"
+          >
+            <StrmIcon name="settings" :size="18" />
+          </button>
+          <button
+            class="strm-icon-btn strm-close"
+            title="关闭"
+            aria-label="关闭"
+            @click="emit('close')"
+          >
+            <StrmIcon name="close" :size="18" />
+          </button>
+        </div>
+      </header>
+      <nav class="strm-mobile-nav" aria-label="移动端媒体导航">
+        <button
+          v-for="type in TYPE_TABS"
+          :key="type.key"
+          :class="{ active: view === 'grid' && typeFilter === type.key }"
+          @click="selectTypeOnly(type.key)"
+        >
+          {{ type.label }}
+        </button>
+        <button :class="{ active: view === 'records' }" @click="switchView('records')">
+          刮削记录
+        </button>
+      </nav>
+      <div :class="['strm-body', view === 'grid' && 'is-grid']">
+        <div v-if="error" class="strm-alert is-error" role="alert">
+          <StrmIcon name="alert" :size="18" />
+          <span>{{ error }}</span>
+          <button class="strm-icon-btn" aria-label="关闭提示" @click="error = ''">
+            <StrmIcon name="close" :size="16" />
+          </button>
+        </div>
+        <div v-else-if="notice" class="strm-alert is-ok" role="status">
+          <StrmIcon name="checkCircle" :size="18" />
+          <span>{{ notice }}</span>
+          <button class="strm-icon-btn" aria-label="关闭提示" @click="notice = ''">
+            <StrmIcon name="close" :size="16" />
+          </button>
+        </div>
+        <template v-if="view === 'grid'">
+          <div class="strm-page-heading">
+            <div>
+              <div class="strm-eyebrow">YOUR PERSONAL MEDIA LIBRARY</div>
+              <h1>
+                媒体库
+                <span class="strm-title-dot">.</span>
+              </h1>
+              <p>一处管理你的 STRM 收藏，让媒体资料保持完整。</p>
+            </div>
+            <div class="strm-page-actions">
+              <button class="strm-btn ghost" :disabled="loading" @click="refreshAll">
+                <StrmIcon name="refresh" :size="16" :class="{ 'strm-spinning': loading }" />
+                刷新媒体
               </button>
-              <template v-for="group in sidebarGroups" :key="group.path || group.name">
-                <div class="strm-sgroup">{{ group.name }}</div>
-                <button :class="['strm-sopt', typeFilter === group.type && !subFilters.length && 'on']" @click="selectTypeOnly(group.type)">
-                  <span>全部{{ group.name }}</span><em>{{ group[group.type] || 0 }}</em>
-                </button>
+              <div class="strm-scan">
                 <button
-                  v-for="child in group.children"
-                  :key="child.key"
-                  :class="['strm-sopt', 'is-child', typeFilter === group.type && subFilters.includes(child.key) && 'on']"
-                  :title="child.pending ? `${child.pending} 项待刮削` : child.path"
-                  @click="selectSubCat(child)"
+                  class="strm-btn"
+                  :disabled="busy"
+                  :aria-expanded="scanMenu"
+                  @click="scanMenu = !scanMenu"
                 >
-                  <span>{{ child.name }}</span><em>{{ child[group.type] || 0 }}</em>
-                  <b v-if="child.pending">{{ child.pending }} 待刮</b>
+                  <StrmIcon name="sparkles" :size="17" />
+                  开始扫描
+                  <StrmIcon name="chevron" :size="15" />
                 </button>
-                <button
-                  v-if="group.loose"
-                  :class="['strm-sopt', 'is-child', typeFilter === group.type && subFilters.includes(group.loose.key) && 'on']"
-                  @click="selectSubCat(group.loose)"
-                >
-                  <span>{{ group.loose.name }}</span><em>{{ group.loose[group.type] || 0 }}</em>
-                </button>
-              </template>
-            </nav>
-          </aside>
-
-          <!-- 右侧内容：随页面滚动 -->
-          <div class="strm-content">
-            <!-- 统计：只保留 待刮削 / 已刮 / 失败（可点击筛选） -->
-            <div class="strm-stats">
-              <button
-                v-for="sf in STATUS_FILTERS"
-                :key="sf.key"
-                :class="['strm-stat', `is-${sf.key}`, statusFilter === sf.key && 'active']"
-                @click="statusFilter = statusFilter === sf.key ? 'all' : sf.key"
-              >
-                <b>{{ statusCounts[sf.key] }}</b>
+                <template v-if="scanMenu">
+                  <button
+                    class="strm-menu-dismiss"
+                    aria-label="关闭扫描菜单"
+                    @click="scanMenu = false"
+                  ></button>
+                  <div class="strm-scan-menu">
+                    <span class="strm-menu-label">扫描所有监控目录</span>
+                    <button @click="runScan(false)">
+                      <StrmIcon name="checkCircle" :size="17" />
+                      <span>
+                        <b>仅补缺失</b>
+                        <em>保留已有资料，补全未刮削媒体</em>
+                      </span>
+                    </button>
+                    <button @click="runScopedScan('incremental')">
+                      <StrmIcon name="activity" :size="17" />
+                      <span>
+                        <b>增量扫描</b>
+                        <em>只处理新增和未刮削的目录</em>
+                      </span>
+                    </button>
+                    <button @click="runScopedScan('unscraped')">
+                      <StrmIcon name="search" :size="17" />
+                      <span>
+                        <b>补漏扫描</b>
+                        <em>重新检查尚未完成的媒体</em>
+                      </span>
+                    </button>
+                    <button class="strm-scan-overwrite" @click="runScan(true)">
+                      <StrmIcon name="refresh" :size="17" />
+                      <span>
+                        <b>覆盖重刮</b>
+                        <em>重新下载全部 NFO 与图片</em>
+                      </span>
+                    </button>
+                    <template v-if="activeSubs.length">
+                      <span class="strm-menu-label">
+                        当前分类：{{ activeSubs.map((sub) => sub.label).join('、') }}
+                      </span>
+                      <button @click="runScan(false, true)">
+                        <span><b>补全当前分类</b></span>
+                      </button>
+                      <button @click="runScan(true, true)">
+                        <span><b>覆盖重刮当前分类</b></span>
+                      </button>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="strm-stats">
+            <button
+              v-for="sf in STATUS_FILTERS"
+              :key="sf.key"
+              :class="['strm-stat', 'is-' + sf.key, statusFilter === sf.key && 'active']"
+              :aria-pressed="statusFilter === sf.key"
+              @click="statusFilter = statusFilter === sf.key ? 'all' : sf.key"
+            >
+              <div class="strm-stat-top">
                 <span>{{ sf.label }}</span>
-                <i class="strm-stat-dot"></i>
+                <span class="strm-stat-icon"><StrmIcon :name="sf.icon" :size="19" /></span>
+              </div>
+              <div class="strm-stat-number">
+                {{ statusCounts[sf.key] }}
+                <small>项媒体</small>
+              </div>
+              <div class="strm-stat-bottom">
+                <span>
+                  <i></i>
+                  {{ sf.hint }}
+                </span>
+                <StrmIcon name="arrow" :size="15" />
+              </div>
+            </button>
+          </div>
+          <div class="strm-library-bar">
+            <div class="strm-library-title">
+              <h2>{{ sectionTitle === '全部' ? '全部媒体' : sectionTitle }}</h2>
+              <span>{{ visibleItems.length }}</span>
+              <button
+                v-if="statusFilter !== 'all'"
+                class="strm-filter-chip"
+                @click="statusFilter = 'all'"
+              >
+                {{ STATUS_LABELS[statusFilter] }}
+                <StrmIcon name="close" :size="12" />
               </button>
             </div>
-
-            <!-- 标题 + 搜索 + 计数 -->
-            <div class="strm-toolbar">
-              <h2 class="strm-section-title">{{ sectionTitle }}</h2>
-              <input v-model="keyword" class="strm-search" type="text" placeholder="搜索标题或路径">
-              <span class="strm-count">共 {{ visibleItems.length }} 项</span>
+            <div class="strm-library-meta">
+              <label v-if="mobileCategories.length" class="strm-mobile-categories">
+                <select
+                  :value="subFilters[0] || ''"
+                  aria-label="媒体分类"
+                  @change="selectMobileCategory($event.target.value)"
+                >
+                  <option value="">全部分类</option>
+                  <option
+                    v-for="category in mobileCategories"
+                    :key="category.key"
+                    :value="category.key"
+                  >
+                    {{ category.label }}
+                  </option>
+                </select>
+                <StrmIcon name="chevron" :size="12" />
+              </label>
+              <span class="strm-updated">
+                <i></i>
+                {{ refreshedLabel }} 更新
+              </span>
             </div>
-
-            <!-- 加载态：骨架卡网格（shimmer），比一行文字更能预告即将出现的内容 -->
+          </div>
+          <div class="strm-toolbar">
+            <label class="strm-search-wrap">
+              <StrmIcon name="search" :size="18" />
+              <input
+                v-model="keyword"
+                class="strm-search"
+                type="search"
+                aria-label="搜索媒体"
+                placeholder="搜索媒体名称或文件路径…"
+              />
+              <span class="strm-search-key">搜索</span>
+            </label>
+            <div class="strm-toolbar-right">
+              <label class="strm-sort">
+                <StrmIcon name="sort" :size="17" />
+                <select v-model="sortBy" aria-label="媒体排序">
+                  <option value="recent">最近更新</option>
+                  <option value="title">名称排序</option>
+                  <option value="scraped">最近刮削</option>
+                </select>
+                <StrmIcon name="chevron" :size="13" />
+              </label>
+              <div class="strm-view-toggle" aria-label="显示方式">
+                <button
+                  :class="{ active: displayMode === 'poster' }"
+                  :aria-pressed="displayMode === 'poster'"
+                  title="海报视图"
+                  aria-label="海报视图"
+                  @click="displayMode = 'poster'"
+                >
+                  <StrmIcon name="grid" :size="17" />
+                </button>
+                <button
+                  :class="{ active: displayMode === 'list' }"
+                  :aria-pressed="displayMode === 'list'"
+                  title="列表视图"
+                  aria-label="列表视图"
+                  @click="displayMode = 'list'"
+                >
+                  <StrmIcon name="list" :size="18" />
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="strm-content">
             <div v-if="loading" class="strm-skel-grid">
               <div v-for="n in 10" :key="n" class="strm-skel">
                 <div class="strm-skel-poster"></div>
@@ -972,1141 +1324,2741 @@ onBeforeUnmount(() => {
                 <div class="strm-skel-line is-short"></div>
               </div>
             </div>
-            <!-- F11 空态引导：区分「库里没东西」与「筛选后没结果」两种，都给出下一步 -->
             <div v-else-if="!items.length" class="strm-empty">
-              <p>监控目录里还没有任何媒体</p>
-              <p class="strm-empty-hint">把 .strm 文件放进监控目录后，点右上角「刷新」即可识别</p>
-              <button class="strm-btn ghost" @click="refreshAll">立即刷新</button>
+              <span class="strm-empty-icon"><StrmIcon name="library" :size="32" /></span>
+              <h3>收藏，从这里开始</h3>
+              <p>将 .strm 文件放入监控目录，然后刷新媒体库。</p>
+              <button class="strm-btn ghost" @click="refreshAll">刷新媒体库</button>
             </div>
             <div v-else-if="!visibleItems.length" class="strm-empty">
-              <p>没有匹配的媒体</p>
-              <p class="strm-empty-hint">当前类型 / 状态 / 分类 / 关键词组合下没有结果</p>
-              <button class="strm-mini" @click="resetFilters">清除筛选</button>
+              <span class="strm-empty-icon"><StrmIcon name="search" :size="32" /></span>
+              <h3>没有找到匹配的媒体</h3>
+              <p>试试其他关键词，或清除当前筛选。</p>
+              <button class="strm-btn ghost" @click="resetFilters">清除筛选</button>
             </div>
-            <div v-else class="strm-grid">
-              <!-- Plex 式海报卡：整卡可点进详情，hover 浮层承载元信息与操作，海报是第一主角 -->
-              <div v-for="item in visibleItems" :key="item.path" class="strm-card" @click="openDetail(item)">
-                <div class="strm-poster" :style="posterStyle(item.title)">
-                  <img
-                    v-if="!posterFailed[item.path]"
-                    class="strm-poster-img"
-                    :src="coverUrl(props.api, props.pluginId, item)"
-                    :alt="item.title"
-                    loading="lazy"
-                    @error="markPosterFailed(item.path)"
+            <div v-else :class="['strm-grid', displayMode === 'list' && 'is-list']">
+              <article v-for="item in visibleItems" :key="item.path" class="strm-card">
+                <div class="strm-poster-wrap">
+                  <button
+                    class="strm-poster"
+                    :style="posterStyle(item.title)"
+                    :aria-label="'查看 ' + item.title + ' 的详情'"
+                    @click="openDetail(item)"
                   >
-                  <span :class="['strm-type', typeClass(item.type)]">{{ typeLabel(item.type) }}</span>
-                  <!-- F4 状态圆点四态：scraped/failed/skipped/pending，叠加队列「刮削中」 -->
-                  <span
-                    :class="['strm-dot', `is-${statusClass(displayStatus(item))}`]"
-                    :title="STATUS_LABELS[displayStatus(item)]"
-                  ></span>
-                  <!-- 失败红条：海报底部直接标出原因 -->
-                  <div v-if="displayStatus(item) === 'failed'" class="strm-fail-strip" :title="item.error_message">
-                    ⚠ {{ errorLabel(item.error_code) }}
-                  </div>
-                  <!-- hover 浮层 -->
-                  <div class="strm-overlay">
-                    <div class="strm-overlay-title">{{ item.title }}</div>
-                    <div class="strm-overlay-meta">{{ subLabel(item) || item.category }} · {{ fileSummary(item) }}</div>
-                    <div class="strm-overlay-status">
-                      <i :class="['strm-overlay-dot', `is-${statusClass(displayStatus(item))}`]"></i>
+                    <img
+                      v-if="!posterFailed[item.path]"
+                      class="strm-poster-img"
+                      :src="coverUrl(props.api, props.pluginId, item)"
+                      :alt="item.title"
+                      loading="lazy"
+                      @error="markPosterFailed(item.path)"
+                    />
+                    <span v-else class="strm-poster-fallback">
+                      <StrmIcon
+                        :name="item.type === 'tv' ? 'tv' : item.type === 'music' ? 'music' : 'film'"
+                        :size="38"
+                      />
+                      <b>{{ item.title }}</b>
+                    </span>
+                    <span :class="['strm-poster-status', 'is-' + statusClass(displayStatus(item))]">
+                      <StrmIcon v-if="displayStatus(item) === 'scraped'" name="check" :size="12" />
+                      <i v-else></i>
                       {{ STATUS_LABELS[displayStatus(item)] }}
-                    </div>
-                    <div class="strm-overlay-actions">
-                      <button class="strm-overlay-btn" @click.stop="openDetail(item)">
-                        {{ item.type === 'tv' ? '剧集预览' : (item.type === 'music' ? '曲目列表' : '版本预览') }}
-                      </button>
-                      <button class="strm-overlay-btn is-primary" :disabled="busy" @click.stop="scrapeItem(item)">整目录重刮</button>
-                    </div>
-                  </div>
+                    </span>
+                    <span :class="['strm-type', typeClass(item.type)]">
+                      {{ typeLabel(item.type) }}
+                    </span>
+                    <span class="strm-poster-open"><StrmIcon name="arrow" :size="23" /></span>
+                    <span
+                      v-if="displayStatus(item) === 'failed'"
+                      class="strm-fail-strip"
+                      :title="item.error_message"
+                    >
+                      <StrmIcon name="alert" :size="13" />
+                      {{ errorLabel(item.error_code) }}
+                    </span>
+                  </button>
                 </div>
-                <div class="strm-card-title" :title="item.path">{{ item.title }}</div>
-                <div class="strm-card-sub">{{ subLabel(item) || item.category }} · {{ fileSummary(item) }}</div>
-              </div>
+                <div class="strm-card-info">
+                  <div class="strm-card-heading">
+                    <button class="strm-card-title" :title="item.path" @click="openDetail(item)">
+                      {{ item.title }}
+                    </button>
+                    <button
+                      class="strm-card-go"
+                      :disabled="busy"
+                      :title="'重新刮削 ' + item.title + '（覆盖元数据）'"
+                      :aria-label="'重新刮削 ' + item.title"
+                      @click="scrapeItem(item)"
+                    >
+                      <StrmIcon name="sparkles" :size="16" />
+                    </button>
+                  </div>
+                  <div class="strm-card-sub">
+                    <span>{{ subLabel(item) || item.category || typeLabel(item.type) }}</span>
+                    <i></i>
+                    {{ fileSummary(item) }}
+                  </div>
+                  <span v-if="displayMode === 'list'" class="strm-card-path">{{ item.path }}</span>
+                </div>
+                <div v-if="displayMode === 'list'" class="strm-list-card-meta">
+                  <span :class="['strm-tag', statusTagClass(displayStatus(item))]">
+                    {{ STATUS_LABELS[displayStatus(item)] }}
+                  </span>
+                  <small>{{ formatDate(item.last_file_change) }} 更新</small>
+                </div>
+              </article>
             </div>
           </div>
-        </div>
-      </template>
-
-      <!-- ============================ 内联详情 ============================ -->
-      <template v-else-if="view === 'detail' && current">
-        <div class="strm-detail">
-          <!-- Hero：Plex 式沉浸横幅 —— 海报当背景氛围层，主色渐变 + 底部压暗做底，
+          <footer class="strm-library-foot">
+            <span>
+              共 {{ items.length }} 项媒体
+              <span class="strm-footer-dot">·</span>
+              当前显示 {{ visibleItems.length }} 项
+            </span>
+            <span>
+              <StrmIcon name="checkCircle" :size="13" />
+              媒体资料，由你掌控
+            </span>
+          </footer>
+        </template>
+        <template v-else-if="view === 'detail' && current">
+          <div class="strm-detail">
+            <!-- Hero：Plex 式沉浸横幅 —— 海报当背景氛围层，主色渐变 + 底部压暗做底，
                前景左侧浮大张海报（2:3）、右侧大标题与元信息，主 CTA 直接落在横幅里。
                横幅恒定深色（与设计稿一致），所以内部文字用白色系，不跟随宿主主题 -->
-          <div class="strm-dhero">
-            <img
-              v-if="!posterFailed[current.path]"
-              class="strm-dhero-bg"
-              :src="coverUrl(props.api, props.pluginId, current)"
-              alt=""
-              aria-hidden="true"
-            >
-            <span class="strm-dhero-scrim"></span>
+            <div class="strm-dhero">
+              <img
+                v-if="!posterFailed[current.path]"
+                class="strm-dhero-bg"
+                :src="coverUrl(props.api, props.pluginId, current)"
+                alt=""
+                aria-hidden="true"
+              />
+              <span class="strm-dhero-scrim"></span>
 
-            <button class="strm-back" @click="closeDetail">
-              <span class="strm-back-arrow">←</span>返回媒体库
-            </button>
+              <button class="strm-back" @click="closeDetail">
+                <span class="strm-back-arrow">←</span>
+                返回媒体库
+              </button>
 
-            <div class="strm-dhero-body">
-              <div class="strm-dhero-poster" :style="posterStyle(current.title)">
-                <img
-                  v-if="!posterFailed[current.path]"
-                  class="strm-poster-img"
-                  :src="coverUrl(props.api, props.pluginId, current)"
-                  :alt="current.title"
-                  @error="markPosterFailed(current.path)"
+              <div class="strm-dhero-body">
+                <div class="strm-dhero-poster" :style="posterStyle(current.title)">
+                  <img
+                    v-if="!posterFailed[current.path]"
+                    class="strm-poster-img"
+                    :src="coverUrl(props.api, props.pluginId, current)"
+                    :alt="current.title"
+                    @error="markPosterFailed(current.path)"
+                  />
+                </div>
+                <div class="strm-dhero-info">
+                  <div class="strm-dhero-kicker">
+                    {{ typeLabel(current.type) }}
+                    <template v-if="subLabel(current)">· {{ subLabel(current) }}</template>
+                  </div>
+                  <h2>{{ current.title }}</h2>
+                  <div class="strm-dhero-tags">
+                    <span class="strm-tag is-plain">{{ current.total_files }} 个文件</span>
+                    <span
+                      :class="['strm-tag', statusTagClass(displayStatus(current))]"
+                      :title="STATUS_LABELS[displayStatus(current)]"
+                    >
+                      <i class="strm-status-dot"></i>
+                      {{ STATUS_LABELS[displayStatus(current)] }}
+                    </span>
+                    <span
+                      v-if="displayStatus(current) === 'failed' && current.error_code"
+                      class="strm-tag is-fail"
+                      :title="current.error_message"
+                    >
+                      {{ errorLabel(current.error_code) }}
+                    </span>
+                  </div>
+                  <!-- F6 两行时间：文件最后变更 与 真实刮削时间分开显示 -->
+                  <div class="strm-dhero-times">
+                    <span>
+                      <b>文件更新</b>
+                      {{ formatDate(current.last_file_change) }}
+                    </span>
+                    <span class="strm-sep">·</span>
+                    <span>
+                      <b>上次刮削</b>
+                      {{ statusOf(current) === 'pending' ? '尚未刮削' : formatTime(current.last_scrape) }}
+                    </span>
+                  </div>
+                  <div class="strm-dhero-path" :title="current.path">{{ current.path }}</div>
+                </div>
+                <div class="strm-dhero-actions">
+                  <button class="strm-btn" :disabled="busy" @click="scrapeWhole">
+                    {{ current.type === 'tv' ? '整剧重新刮削' : '整目录重新刮削' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="current.type === 'tv'" class="strm-season-bar">
+              <span class="strm-season-label">SEASON</span>
+              <button
+                v-for="season in seasons"
+                :key="season.no"
+                :class="['strm-season-chip', String(season.no) === seasonKey && 'active']"
+                @click="seasonKey = String(season.no)"
+              >
+                {{ season.name }}
+                <em>{{ season.files.length }}</em>
+              </button>
+            </div>
+
+            <div class="strm-list-actions">
+              <button class="strm-mini" @click="selectAll">全选本页</button>
+              <button class="strm-mini" @click="selectUnscraped">选中未刮削</button>
+              <button class="strm-mini" @click="clearSelection">清空</button>
+              <span class="strm-list-sum">
+                共
+                <b>{{ rows.length }}</b>
+                项
+                <template v-if="selectedRows.length">
+                  · 已选
+                  <b>{{ selectedRows.length }}</b>
+                </template>
+              </span>
+            </div>
+
+            <div class="strm-list">
+              <div v-if="!rows.length" class="strm-empty">暂无文件</div>
+              <div
+                v-for="row in rows"
+                :key="row.path"
+                :class="[
+                  'strm-row',
+                  `is-${statusClass(displayStatus(row))}`,
+                  selected.has(row.path) && 'is-selected',
+                ]"
+              >
+                <span class="strm-row-bar"></span>
+                <input
+                  type="checkbox"
+                  :aria-label="'选择 ' + row.name"
+                  :checked="selected.has(row.path)"
+                  @change="toggleRow(row.path)"
+                />
+                <span v-if="current.type === 'tv'" class="strm-row-no">
+                  E{{ String(row.episode ?? 0).padStart(2, '0') }}
+                </span>
+                <span v-else class="strm-row-no is-plain">{{ row.label }}</span>
+                <span class="strm-row-name" :title="row.name">{{ row.name }}</span>
+                <span class="strm-row-size">{{ formatSize(row.size) }}</span>
+                <span
+                  :class="['strm-row-state', `is-${statusClass(displayStatus(row))}`]"
+                  :title="row.error_message || STATUS_LABELS[displayStatus(row)]"
                 >
+                  <i></i>
+                  {{ STATUS_LABELS[displayStatus(row)] }}
+                </span>
+                <button
+                  class="strm-row-go"
+                  :disabled="busy"
+                  title="重下该条目的 NFO 与图片（覆盖）"
+                  @click="scrapeOne(row)"
+                >
+                  刮削
+                </button>
               </div>
-              <div class="strm-dhero-info">
-                <div class="strm-dhero-kicker">
-                  {{ typeLabel(current.type) }}<template v-if="subLabel(current)"> · {{ subLabel(current) }}</template>
-                </div>
-                <h2>{{ current.title }}</h2>
-                <div class="strm-dhero-tags">
-                  <span class="strm-tag is-plain">{{ current.total_files }} 个文件</span>
-                  <span :class="['strm-tag', statusTagClass(displayStatus(current))]" :title="STATUS_LABELS[displayStatus(current)]">
-                    <i class="strm-status-dot"></i>{{ STATUS_LABELS[displayStatus(current)] }}
-                  </span>
-                  <span v-if="displayStatus(current) === 'failed' && current.error_code" class="strm-tag is-fail" :title="current.error_message">
-                    {{ errorLabel(current.error_code) }}
-                  </span>
-                </div>
-                <!-- F6 两行时间：文件最后变更 与 真实刮削时间分开显示 -->
-                <div class="strm-dhero-times">
-                  <span><b>文件更新</b>{{ formatDate(current.last_file_change) }}</span>
-                  <span class="strm-sep">·</span>
-                  <span><b>上次刮削</b>{{ formatTime(current.last_scrape) }}</span>
-                </div>
-                <div class="strm-dhero-path" :title="current.path">{{ current.path }}</div>
-              </div>
-              <div class="strm-dhero-actions">
-                <button class="strm-btn" :disabled="busy" @click="scrapeWhole">
-                  {{ current.type === 'tv' ? '整剧重新刮削' : '整目录重新刮削' }}
+            </div>
+
+            <!-- 收尾操作条：只保留「按选中执行」，整目录/整剧的主 CTA 已上移到 Hero，
+               避免同一个动作在上下两处重复出现 -->
+            <div class="strm-detail-foot">
+              <span class="strm-sel">
+                已选
+                <b>{{ selectedRows.length }}</b>
+                项
+              </span>
+              <div class="strm-foot-right">
+                <button
+                  class="strm-btn ghost"
+                  :disabled="busy || !selectedRows.length"
+                  @click="scrapeSelected"
+                >
+                  刮削选中{{
+                    current.type === 'tv' ? '单集' : current.type === 'music' ? '曲目' : '版本'
+                  }}
                 </button>
               </div>
             </div>
           </div>
+        </template>
 
-          <div v-if="current.type === 'tv'" class="strm-season-bar">
-            <span class="strm-season-label">SEASON</span>
-            <button
-              v-for="season in seasons"
-              :key="season.no"
-              :class="['strm-season-chip', String(season.no) === seasonKey && 'active']"
-              @click="seasonKey = String(season.no)"
-            >{{ season.name }}<em>{{ season.files.length }}</em></button>
-          </div>
-
-          <div class="strm-list-actions">
-            <button class="strm-mini" @click="selectAll">全选本页</button>
-            <button class="strm-mini" @click="selectUnscraped">选中未刮削</button>
-            <button class="strm-mini" @click="clearSelection">清空</button>
-            <span class="strm-list-sum">
-              共 <b>{{ rows.length }}</b> 项<template v-if="selectedRows.length"> · 已选 <b>{{ selectedRows.length }}</b></template>
+        <!-- ============================ 刮削记录 ============================ -->
+        <template v-else-if="view === 'records'">
+          <div class="strm-rec-head">
+            <span class="strm-rec-count">
+              最近
+              <b>{{ records.length }}</b>
+              条
             </span>
-          </div>
-
-          <div class="strm-list">
-            <div v-if="!rows.length" class="strm-empty">暂无文件</div>
-            <div
-              v-for="row in rows"
-              :key="row.path"
-              :class="['strm-row', `is-${statusClass(displayStatus(row))}`, selected.has(row.path) && 'is-selected']"
-            >
-              <span class="strm-row-bar"></span>
-              <input type="checkbox" :checked="selected.has(row.path)" @change="toggleRow(row.path)">
-              <span v-if="current.type === 'tv'" class="strm-row-no">
-                E{{ String(row.episode ?? 0).padStart(2, '0') }}
-              </span>
-              <span v-else class="strm-row-no is-plain">{{ row.label }}</span>
-              <span class="strm-row-name" :title="row.name">{{ row.name }}</span>
-              <span class="strm-row-size">{{ formatSize(row.size) }}</span>
-              <span
-                :class="['strm-row-state', `is-${statusClass(displayStatus(row))}`]"
-                :title="row.error_message || STATUS_LABELS[displayStatus(row)]"
-              >
-                <i></i>{{ STATUS_LABELS[displayStatus(row)] }}
-              </span>
-              <button
-                class="strm-row-go"
-                :disabled="busy"
-                title="重下该条目的 NFO 与图片（覆盖）"
-                @click="scrapeOne(row)"
-              >刮削</button>
-            </div>
-          </div>
-
-          <!-- 收尾操作条：只保留「按选中执行」，整目录/整剧的主 CTA 已上移到 Hero，
-               避免同一个动作在上下两处重复出现 -->
-          <div class="strm-detail-foot">
-            <span class="strm-sel">已选 <b>{{ selectedRows.length }}</b> 项</span>
             <div class="strm-foot-right">
-              <button class="strm-btn ghost" :disabled="busy || !selectedRows.length" @click="scrapeSelected">
-                刮削选中{{ current.type === 'tv' ? '单集' : (current.type === 'music' ? '曲目' : '版本') }}
+              <button class="strm-btn ghost" :disabled="recordsLoading" @click="loadRecords">
+                刷新记录
+              </button>
+              <button class="strm-btn ghost" :disabled="!records.length" @click="clearRecords">
+                清空记录
               </button>
             </div>
           </div>
-        </div>
-      </template>
 
-      <!-- ============================ 刮削记录 ============================ -->
-      <template v-else-if="view === 'records'">
-        <div class="strm-rec-head">
-          <span class="strm-rec-count">最近 <b>{{ records.length }}</b> 条</span>
-          <div class="strm-foot-right">
-            <button class="strm-btn ghost" :disabled="recordsLoading" @click="loadRecords">刷新记录</button>
-            <button class="strm-btn ghost" :disabled="!records.length" @click="clearRecords">清空记录</button>
+          <!-- F10 记录筛选：状态 / 类型 / 分类 / 时间范围，改完即重新拉取 -->
+          <div class="strm-rec-filter">
+            <select v-model="recordFilter.success" @change="loadRecords">
+              <option value="">全部结果</option>
+              <option value="true">仅成功</option>
+              <option value="false">仅失败</option>
+            </select>
+            <select v-model="recordFilter.type" @change="loadRecords">
+              <option value="">全部类型</option>
+              <option value="dir">目录</option>
+              <option value="file">单集</option>
+            </select>
+            <select v-model="recordFilter.category" @change="loadRecords">
+              <option value="">全部分类</option>
+              <option v-for="cat in recordCategories" :key="cat" :value="cat">{{ cat }}</option>
+            </select>
+            <input
+              v-model="recordFilter.since"
+              type="date"
+              @change="loadRecords"
+              title="起始日期"
+            />
+            <span class="strm-rec-filter-sep">至</span>
+            <input
+              v-model="recordFilter.until"
+              type="date"
+              @change="loadRecords"
+              title="结束日期"
+            />
+            <button v-if="hasRecordFilter" class="strm-mini" @click="resetRecordFilter">
+              重置
+            </button>
+            <button
+              class="strm-btn small ghost"
+              :disabled="!statusCounts.failed"
+              @click="retryFailed"
+            >
+              重试失败项（{{ statusCounts.failed }}）
+            </button>
           </div>
-        </div>
 
-        <!-- F10 记录筛选：状态 / 类型 / 分类 / 时间范围，改完即重新拉取 -->
-        <div class="strm-rec-filter">
-          <select v-model="recordFilter.success" @change="loadRecords">
-            <option value="">全部结果</option>
-            <option value="true">仅成功</option>
-            <option value="false">仅失败</option>
-          </select>
-          <select v-model="recordFilter.type" @change="loadRecords">
-            <option value="">全部类型</option>
-            <option value="dir">目录</option>
-            <option value="file">单集</option>
-          </select>
-          <select v-model="recordFilter.category" @change="loadRecords">
-            <option value="">全部分类</option>
-            <option v-for="cat in recordCategories" :key="cat" :value="cat">{{ cat }}</option>
-          </select>
-          <input v-model="recordFilter.since" type="date" @change="loadRecords" title="起始日期">
-          <span class="strm-rec-filter-sep">至</span>
-          <input v-model="recordFilter.until" type="date" @change="loadRecords" title="结束日期">
-          <button v-if="hasRecordFilter" class="strm-mini" @click="resetRecordFilter">重置</button>
-          <button class="strm-btn small ghost" :disabled="!statusCounts.failed" @click="retryFailed">
-            重试失败项（{{ statusCounts.failed }}）
-          </button>
-        </div>
-
-        <div v-if="recordsLoading" class="strm-empty">正在读取记录…</div>
-        <div v-else-if="!records.length" class="strm-empty">
-          <p>{{ hasRecordFilter ? '没有符合筛选条件的记录' : '暂无刮削记录' }}</p>
-          <button v-if="hasRecordFilter" class="strm-mini" @click="resetRecordFilter">清除筛选</button>
-        </div>
-        <!-- 时间轴式记录列表：左侧状态点 + 标题/标签一行 + 消息一行，时间与结果徽章靠右 -->
-        <div v-else class="strm-rec-list">
-          <div
-            v-for="(record, index) in records"
-            :key="`${record.time}-${index}`"
-            :class="['strm-rec', record.success ? 'is-ok' : 'is-fail']"
-          >
-            <span class="strm-rec-dot"></span>
-            <div class="strm-rec-main">
-              <div class="strm-rec-top">
-                <span class="strm-rec-title" :title="record.target">{{ record.title }}</span>
-                <span v-if="record.category" class="strm-tag is-plain">{{ record.category }}</span>
-                <span v-if="record.exists === false" class="strm-tag is-warn">目录已删除</span>
-                <!-- F9 错误码中文映射：失败记录标出结构化原因 -->
-                <span v-if="!record.success && record.error_code" class="strm-tag is-fail" :title="record.message">
-                  {{ errorLabel(record.error_code) }}
-                </span>
+          <div v-if="recordsLoading" class="strm-empty">正在读取记录…</div>
+          <div v-else-if="!records.length" class="strm-empty">
+            <p>{{ hasRecordFilter ? '没有符合筛选条件的记录' : '暂无刮削记录' }}</p>
+            <button v-if="hasRecordFilter" class="strm-mini" @click="resetRecordFilter">
+              清除筛选
+            </button>
+          </div>
+          <!-- 时间轴式记录列表：左侧状态点 + 标题/标签一行 + 消息一行，时间与结果徽章靠右 -->
+          <div v-else class="strm-rec-list">
+            <div
+              v-for="(record, index) in records"
+              :key="`${record.time}-${index}`"
+              :class="['strm-rec', record.success ? 'is-ok' : 'is-fail']"
+            >
+              <span class="strm-rec-dot"></span>
+              <div class="strm-rec-main">
+                <div class="strm-rec-top">
+                  <span class="strm-rec-title" :title="record.target">{{ record.title }}</span>
+                  <span v-if="record.category" class="strm-tag is-plain">
+                    {{ record.category }}
+                  </span>
+                  <span v-if="record.exists === false" class="strm-tag is-warn">目录已删除</span>
+                  <!-- F9 错误码中文映射：失败记录标出结构化原因 -->
+                  <span
+                    v-if="!record.success && record.error_code"
+                    class="strm-tag is-fail"
+                    :title="record.message"
+                  >
+                    {{ errorLabel(record.error_code) }}
+                  </span>
+                </div>
+                <div v-if="record.message" class="strm-rec-msg" :title="record.message">
+                  {{ record.message }}
+                </div>
               </div>
-              <div v-if="record.message" class="strm-rec-msg" :title="record.message">{{ record.message }}</div>
+              <span :class="['strm-rec-badge', record.success ? 'is-ok' : 'is-fail']">
+                {{ record.success ? '成功' : '失败' }}
+              </span>
+              <span class="strm-rec-time">{{ record.time }}</span>
             </div>
-            <span :class="['strm-rec-badge', record.success ? 'is-ok' : 'is-fail']">
-              {{ record.success ? '成功' : '失败' }}
-            </span>
-            <span class="strm-rec-time">{{ record.time }}</span>
           </div>
-        </div>
-      </template>
-    </div>
+        </template>
+      </div>
+    </main>
+    <Transition name="strm-drawer">
+      <div v-if="queuePanelOpen" class="strm-queue-layer">
+        <button
+          class="strm-queue-backdrop"
+          aria-label="关闭任务队列"
+          @click="queuePanelOpen = false"
+        ></button>
+        <aside
+          ref="queuePanelEl"
+          class="strm-queue-panel"
+          @keydown="trapQueueFocus"
+          role="dialog"
+          aria-modal="true"
+          aria-label="任务队列"
+        >
+          <div class="strm-drawer-head">
+            <span class="strm-drawer-icon"><StrmIcon name="queue" :size="23" /></span>
+            <div>
+              <h2>任务队列</h2>
+              <p>{{ busy ? '正在处理你的媒体资料' : '所有任务已就绪' }}</p>
+            </div>
+            <button class="strm-icon-btn" aria-label="关闭任务队列" @click="queuePanelOpen = false">
+              <StrmIcon name="close" :size="19" />
+            </button>
+          </div>
+          <div class="strm-queue-stats">
+            <div>
+              <b>{{ queue.stats.done || 0 }}</b>
+              <span>已完成</span>
+            </div>
+            <div>
+              <b>{{ queue.stats.failed || 0 }}</b>
+              <span>失败</span>
+            </div>
+            <div>
+              <b>{{ queue.queued_total || 0 }}</b>
+              <span>排队中</span>
+            </div>
+          </div>
+          <div class="strm-queue-scroll">
+            <div v-if="queue.running" class="strm-queue-sec">
+              <span class="strm-queue-sec-title">正在执行</span>
+              <div class="strm-queue-item is-busy">
+                <StrmIcon name="refresh" :size="18" class="strm-spinning" />
+                <div>
+                  <b>{{ queueTargetLabel(queue.running) }}</b>
+                  <small>{{ kindLabel(queue.running.kind) }} · 处理中</small>
+                </div>
+              </div>
+            </div>
+            <div v-if="queue.queued?.length" class="strm-queue-sec">
+              <span class="strm-queue-sec-title">接下来 · {{ queue.queued_total }}</span>
+              <div v-for="item in queue.queued" :key="item.key" class="strm-queue-item">
+                <StrmIcon name="clock" :size="17" />
+                <div>
+                  <b>{{ queueTargetLabel(item) }}</b>
+                  <small>{{ kindLabel(item.kind) }}</small>
+                </div>
+                <button class="strm-mini" @click="cancelQueue(item.target)">取消</button>
+              </div>
+            </div>
+            <div v-if="queue.recent?.length" class="strm-queue-sec">
+              <span class="strm-queue-sec-title">最近完成</span>
+              <div
+                v-for="(item, index) in queue.recent.slice(0, 8)"
+                :key="index"
+                :class="['strm-queue-item', item.success ? 'is-ok' : 'is-fail']"
+              >
+                <StrmIcon :name="item.success ? 'checkCircle' : 'alert'" :size="17" />
+                <div>
+                  <b>{{ queueTargetLabel(item) }}</b>
+                  <small>{{ item.success ? '媒体资料已补全' : item.message || '刮削失败' }}</small>
+                </div>
+              </div>
+            </div>
+            <div v-if="!busy && !queue.recent?.length" class="strm-empty">
+              <StrmIcon name="checkCircle" :size="36" />
+              <h3>暂时没有任务</h3>
+              <p>扫描媒体或手动刮削后，进度会显示在这里。</p>
+            </div>
+          </div>
+          <div class="strm-queue-actions">
+            <button
+              class="strm-btn ghost"
+              :disabled="!statusCounts.failed || busy"
+              @click="retryFailed"
+            >
+              重试失败项
+            </button>
+            <button class="strm-btn ghost" :disabled="!busy" @click="cancelQueue()">
+              取消全部排队
+            </button>
+          </div>
+        </aside>
+      </div>
+    </Transition>
   </div>
 </template>
-
 <style scoped>
+/* 色彩跟随宿主主题；预览页只提供同名主题变量。 */
 .strm {
+  --strm-primary: rgb(var(--v-theme-primary, 45, 113, 86));
+  --strm-surface: rgb(var(--v-theme-surface, 255, 255, 255));
+  --strm-text: rgb(var(--v-theme-on-surface, 39, 48, 45));
+  --strm-muted: rgba(var(--v-theme-on-surface, 39, 48, 45), 0.49);
+  --strm-line: rgba(var(--v-theme-on-surface, 39, 48, 45), 0.085);
+  --strm-wash: color-mix(in srgb, var(--strm-surface) 97%, var(--strm-text));
+  --strm-tint: color-mix(in srgb, var(--strm-primary) 8%, var(--strm-surface));
   width: 100%;
-  /* --strm-h 由 syncRootHeight 运行时注入（视口高度 - 组件顶边）：
-     有值时整页锁高，头部/侧边栏固定、只有海报区滚动；无值时回退页面自然滚动 */
-  height: var(--strm-h, auto);
+  height: var(--strm-h, 90vh);
+  min-height: 380px;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+  background: var(--strm-wash);
+  color: var(--strm-text);
+  font-size: 13px;
+  line-height: 1.55;
+  font-family: inherit;
+  text-align: left;
+}
+.strm *,
+.strm *::before,
+.strm *::after {
+  box-sizing: border-box;
+}
+.strm button,
+.strm input,
+.strm select {
+  font: inherit;
+  color: inherit;
+}
+.strm button {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.strm button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.strm button:focus-visible,
+.strm input:focus-visible,
+.strm select:focus-visible {
+  outline: 2px solid var(--strm-primary);
+  outline-offset: 3px;
+}
+.strm h1,
+.strm h2,
+.strm h3,
+.strm p {
+  margin: 0;
+}
+.strm-side {
   display: flex;
   flex-direction: column;
+  width: 224px;
+  flex: 0 0 224px;
+  min-height: 0;
+  background: var(--strm-surface);
+  border-right: 1px solid var(--strm-line);
+  padding: 28px 15px 13px;
   overflow: hidden;
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
-  font-family: inherit;
+}
+.strm-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 7px;
+  margin-bottom: 30px;
+}
+.strm-logo {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--strm-primary);
+  color: white;
+  box-shadow: 0 4px 9px color-mix(in srgb, var(--strm-primary) 15%, transparent);
+}
+.strm-brand strong {
+  display: block;
+  font-size: 20px;
+  line-height: 1.15;
+  letter-spacing: -0.7px;
+  font-weight: 750;
+}
+.strm-brand strong span {
+  font-weight: 400;
+}
+.strm-brand small {
+  font-size: 10px;
+  color: var(--strm-muted);
+  display: block;
+  margin-top: 5px;
+  letter-spacing: 0.6px;
+}
+.strm-workspace {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--strm-line);
+  border-radius: 9px;
+  margin-bottom: 27px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.strm-workspace small {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--strm-muted);
+  margin-top: 1px;
+}
+.strm-workspace-mark {
+  background: var(--strm-wash);
+  border: 1px solid var(--strm-line);
+  width: 30px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+}
+.strm-online-dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4d9b76;
+  box-shadow: 0 0 0 3px #4d9b7610;
+}
+.strm-online-dot.off {
+  background: #9da5a1;
+  box-shadow: none;
+}
+.strm-workspace > .strm-online-dot {
+  margin-left: auto;
+}
+.strm-side-label {
+  display: flex;
+  justify-content: space-between;
+  color: var(--strm-muted);
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  padding: 0 12px;
+  margin-bottom: 10px;
+}
+.strm-side-label > span {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+}
+.strm-side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.strm-sopt {
+  border: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  width: 100%;
+  min-height: 38px;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--strm-muted) !important;
+  text-align: left;
+  font-size: 13px !important;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.strm-sopt:hover {
+  color: var(--strm-primary) !important;
+  background: var(--strm-wash);
+}
+.strm-sopt.on {
+  color: var(--strm-primary) !important;
+  background: var(--strm-tint);
+  font-weight: 600 !important;
+}
+.strm-sopt em {
+  font-size: 11px;
+  font-weight: 400;
+  font-style: normal;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--strm-muted);
+}
+.strm-sopt.on em {
+  color: var(--strm-primary);
+  background: color-mix(in srgb, var(--strm-primary) 9%, transparent);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.strm-nav-arrow {
+  margin-left: auto;
+  transform: rotate(-90deg);
+  opacity: 0.5;
+}
+.strm-side-divider {
+  height: 1px;
+  flex-shrink: 0;
+  background: var(--strm-line);
+  margin: 23px 9px 21px;
+}
+.strm-category-nav {
+  overflow-y: auto;
+  min-height: 60px;
+  scrollbar-width: thin;
+  flex: 1;
+  padding-bottom: 15px;
+}
+.strm-sgroup {
+  color: var(--strm-muted);
+  font-size: 11px;
+  padding: 5px 12px 6px;
+  opacity: 0.7;
+}
+.strm-sgroup:not(:first-child) {
+  margin-top: 9px;
+}
+.strm-sopt.is-child {
+  min-height: 32px;
+  padding: 6px 12px;
+  gap: 12px;
+  font-size: 12px !important;
+}
+.strm-category-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 2px;
+  background: #8c9cac;
+  margin-left: 4px;
+}
+.strm-category-dot.tv {
+  background: #99a68b;
+}
+.strm-category-dot.movie {
+  background: #b3a188;
+}
+.strm-sopt b {
+  font-size: 10px;
+  font-weight: 500;
+  color: #a37435;
+  background: #c9974f12;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.strm-side-empty {
+  color: var(--strm-muted);
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.strm-side-bottom {
+  margin-top: auto;
+  padding-top: 12px;
+}
+.strm-monitor-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--strm-wash);
+  border-radius: 8px;
+  padding: 11px 9px;
+  margin-bottom: 10px;
+}
+.strm-monitor-card b {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+}
+.strm-monitor-card small {
+  display: block;
+  font-size: 9px;
+  color: var(--strm-muted);
+  margin-top: 2px;
+}
+.strm-monitor-icon {
+  color: var(--strm-primary);
+}
+.strm-monitor-card > i {
+  margin-left: auto;
+  width: 5px;
+  height: 5px;
+}
+.strm-settings {
+  margin-bottom: 10px;
+}
+.strm-settings-arrow {
+  margin-left: auto;
+  opacity: 0.55;
+}
+.strm-side-caption {
+  padding: 0 7px;
+  color: var(--strm-muted);
+  opacity: 0.55;
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  display: flex;
+  justify-content: space-between;
+}
+.strm-side-caption span {
+  letter-spacing: 0;
+}
+.strm-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .strm-head {
-  position: relative;
-  z-index: 30; /* 高于海报卡/浮层（z-index 2），扫描下拉不被遮挡 */
+  height: 65px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--strm-line);
+  background: var(--strm-surface);
+  gap: 12px;
+}
+.strm-crumb {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  font-size: 12px;
+  color: var(--strm-muted);
+  white-space: nowrap;
+}
+.strm-crumb > svg {
+  opacity: 0.7;
+}
+.strm-crumb b {
+  font-weight: 500;
+  color: var(--strm-text);
+}
+.strm-crumb-slash {
+  opacity: 0.4;
+}
+.strm-head-actions {
   display: flex;
   align-items: center;
   gap: 13px;
-  flex-wrap: wrap;
-  padding: 14px 22px 13px;
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  border-bottom: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
+  margin-left: auto;
 }
-.strm-crumb {
-  font-size: 11px; font-weight: 500; line-height: 1.3;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
+.strm-monitor-badge {
+  color: var(--strm-muted);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
 }
-.strm-crumb b { color: rgb(var(--v-theme-primary, 124, 92, 252)); font-weight: 700; }
-.strm-logo {
-  width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
-  background: rgb(var(--v-theme-primary, 124, 92, 252));
-  color: rgb(var(--v-theme-on-primary, 255, 255, 255));
-  display: flex; align-items: center; justify-content: center; font-size: 19px; font-weight: 700;
+.strm-queue-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px !important;
+  background: transparent;
+  border: 0;
+  padding: 7px 2px;
 }
-.strm-heading h1 { font-size: 19px; font-weight: 700; margin: 0; }
-.strm-heading p {
-  font-size: 12.5px; margin: 2px 0 0;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .62));
+.strm-queue-trigger:hover {
+  color: var(--strm-primary);
 }
-.strm-head-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: 8px; }
-.strm-chip {
-  border-radius: 999px; padding: 4px 11px; font-size: 12px;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .06);
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .7));
+.strm-queue-trigger b {
+  background: var(--strm-tint);
+  color: var(--strm-primary);
+  font-size: 10px;
+  border-radius: 4px;
+  padding: 0 5px;
 }
-.strm-chip-dot {
-  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-  background: currentColor; margin-right: 6px; vertical-align: 1px;
+.strm-queue-trigger.is-busy > svg {
+  color: #bc8b36;
 }
-.strm-chip.is-ok { background: rgba(22, 163, 74, .12); color: #16A34A; }
-.strm-chip.is-ok .strm-chip-dot { animation: strm-pulse 2s ease-in-out infinite; }
-.strm-chip.is-warn { background: rgba(234, 138, 31, .14); color: #EA8A1F; }
-.strm-chip.is-queue { border: none; cursor: pointer; font-family: inherit; }
-.strm-chip.is-busy { background: rgba(234, 138, 31, .14); color: #EA8A1F; }
-.strm-head-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
-.strm-close {
-  width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0; cursor: pointer;
-  font-size: 18px; line-height: 1;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
-  background: transparent; color: inherit;
+.strm-head-divider {
+  height: 17px;
+  width: 1px;
+  background: var(--strm-line);
+}
+.strm-icon-btn {
+  width: 29px;
+  height: 29px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--strm-muted) !important;
+}
+.strm-icon-btn:hover {
+  background: var(--strm-wash);
+  color: var(--strm-primary) !important;
 }
 .strm-body {
-  flex: 1 1 auto;
-  min-height: 0;
+  padding: 27px 32px 0;
   overflow-y: auto;
-  padding: 16px 22px 26px;
+  flex: 1;
+  min-height: 0;
+  scrollbar-width: thin;
 }
-/* 媒体库视图：body 不再自身滚动，把滚动权下放给右栏内容 */
 .strm-body.is-grid {
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-
-/* 媒体库双栏：左侧固定分类侧边栏 + 右侧内容（仅右栏滚动） */
-.strm-grid-wrap {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
-  align-items: stretch;
+.strm-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 25px;
+  flex-shrink: 0;
 }
-.strm-side {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px 10px 18px;
-  /* 边界感：侧栏垫一层浅底色 + 分隔线，与内容区明确分区 */
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .035);
-  border-right: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  border-radius: 12px 0 0 0;
+.strm-eyebrow {
+  font-size: 9px;
+  font-weight: 550;
+  letter-spacing: 1.9px;
+  color: var(--strm-muted);
+  opacity: 0.85;
+  margin-bottom: 5px;
 }
-.strm-side-head {
-  font-size: 11px; letter-spacing: .6px; padding: 4px 12px 10px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
+.strm-page-heading h1 {
+  font-size: 27px;
+  letter-spacing: -1px;
+  line-height: 1.55;
+  font-weight: 650;
 }
-.strm-sgroup {
-  font-size: 11px; letter-spacing: .4px; padding: 14px 12px 6px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
+.strm-title-dot {
+  color: var(--strm-primary);
+  font-size: 33px;
+  margin-left: 3px;
 }
-.strm-sopt {
-  display: flex; align-items: center; gap: 10px; width: 100%;
-  padding: 8px 12px; border: none; border-radius: 9px;
-  background: transparent; cursor: pointer; text-align: left; font-family: inherit; font-size: 13px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .72));
-  box-shadow: inset 2px 0 0 transparent;
-  transition: background .12s, color .12s;
+.strm-page-heading p {
+  margin-top: 3px;
+  color: var(--strm-muted);
+  font-size: 12px;
 }
-.strm-sopt:hover {
-  background: rgba(var(--v-theme-primary, 124, 92, 252), .09);
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
+.strm-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-top: 17px;
 }
-.strm-sopt.on {
-  background: linear-gradient(135deg, rgb(var(--v-theme-primary, 124, 92, 252)), color-mix(in srgb, rgb(var(--v-theme-primary, 124, 92, 252)) 62%, #fff));
-  color: #fff; font-weight: 600;
-  box-shadow: 0 10px 22px -10px rgba(var(--v-theme-primary, 124, 92, 252), .72);
-}
-.strm-sopt em { margin-left: auto; font-style: normal; font-size: 11px; font-weight: 500; opacity: .7; }
-.strm-sopt.on em { opacity: .88; color: #fff; }
-.strm-sopt b { font-weight: 700; font-size: 10.5px; color: #B45309; background: rgba(234, 138, 31, .16); padding: 1px 7px; border-radius: 99px; }
-.strm-sopt.on b { background: rgba(255, 255, 255, .24); color: #fff; }
-.strm-sopt.is-child { padding-left: 28px; font-size: 12.5px; font-weight: 400; }
-.strm-content {
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 2px 8px 24px 20px;
-}
-.strm-section-title { font-size: 16px; font-weight: 700; margin: 0; flex: 0 0 auto; white-space: nowrap; }
-
 .strm-btn {
-  padding: 8px 15px; border-radius: 10px; font-size: 13px; font-weight: 600; font-family: inherit;
-  cursor: pointer; border: none; transition: transform .15s, box-shadow .15s, filter .15s;
-  background: rgb(var(--v-theme-primary, 124, 92, 252));
-  color: rgb(var(--v-theme-on-primary, 255, 255, 255));
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  background: var(--strm-primary);
+  border-radius: 6px;
+  color: rgb(var(--v-theme-on-primary, 255, 255, 255)) !important;
+  font-size: 12px !important;
+  font-weight: 550 !important;
+  white-space: nowrap;
+  transition:
+    filter 0.15s,
+    box-shadow 0.15s;
 }
-/* hover 上浮 + 同色投影，按压时回落：给按钮物理反馈 */
-.strm-btn:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(var(--v-theme-primary, 124, 92, 252), .32); }
-.strm-btn:active:not(:disabled) { transform: translateY(0); box-shadow: none; }
-.strm-btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+.strm-btn:hover:not(:disabled) {
+  filter: brightness(0.95);
+  box-shadow: 0 2px 7px #0000000b;
+}
 .strm-btn.ghost {
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  color: rgb(var(--v-theme-primary, 124, 92, 252));
-  border: 1px solid rgba(var(--v-theme-primary, 124, 92, 252), .35);
+  color: var(--strm-text) !important;
+  background: var(--strm-surface);
+  border-color: var(--strm-line);
 }
-.strm-btn.ghost:hover:not(:disabled) { box-shadow: 0 6px 16px rgba(var(--v-theme-primary, 124, 92, 252), .18); }
-.strm-btn.small { flex: 1; padding: 7px 8px; font-size: 12px; }
-
-/* 全量扫描下拉：把「是否覆盖」从两个并排按钮收进一个菜单，降低误点全库重刮的概率。
-   padding-bottom 桥接按钮与菜单之间的 6px 空隙（负 margin 抵消布局影响），
-   否则鼠标从按钮滑向菜单必经空隙触发 @mouseleave，菜单秒关 */
-.strm-scan { position: relative; padding-bottom: 6px; margin-bottom: -6px; }
+.strm-btn.small {
+  min-height: 29px;
+  font-size: 11px !important;
+  padding: 5px 10px;
+}
+.strm-scan {
+  position: relative;
+}
+.strm-menu-dismiss {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  background: transparent;
+  z-index: 31;
+  cursor: default !important;
+}
 .strm-scan-menu {
-  position: absolute; top: 100%; right: 0; z-index: 5;
-  min-width: 220px; padding: 6px;
-  display: flex; flex-direction: column; gap: 2px;
-  border-radius: 12px;
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
-  box-shadow: 0 12px 32px rgba(10, 11, 20, .18);
+  position: absolute;
+  right: 0;
+  top: calc(100% + 9px);
+  width: 260px;
+  background: var(--strm-surface);
+  box-shadow: 0 12px 45px #0000001c;
+  border: 1px solid var(--strm-line);
+  border-radius: 10px;
+  padding: 7px;
+  z-index: 32;
 }
-.strm-scan-menu button {
-  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
-  padding: 8px 11px; border: none; border-radius: 9px; cursor: pointer;
-  font-size: 13px; font-family: inherit; text-align: left;
-  background: transparent; color: rgb(var(--v-theme-on-surface, 27, 29, 41));
+.strm-menu-label {
+  color: var(--strm-muted);
+  font-size: 10px;
+  display: block;
+  padding: 7px 9px;
 }
-.strm-scan-menu button:hover { background: rgba(var(--v-theme-primary, 124, 92, 252), .10); }
-.strm-scan-menu button b { font-weight: 600; }
-.strm-scan-menu button em {
-  font-style: normal; font-size: 11.5px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .55));
-}
-.strm-scan-sep {
-  margin: 5px 4px 3px; padding-top: 6px; font-size: 11px;
-  border-top: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .6));
-}
-
-.strm-alert {
-  display: flex; align-items: center; gap: 10px;
-  flex-shrink: 0; /* 同队列条：flex 列容器里不能被压扁 */
-  border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px;
-}
-.strm-alert span { flex: 1; min-width: 0; }
-.strm-alert.is-error { background: rgba(229, 72, 77, .12); color: #E5484D; }
-.strm-alert.is-ok { background: rgba(22, 163, 74, .12); color: #16A34A; }
-
-.strm-task {
-  display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
-  padding: 10px 14px; border-radius: 10px;
-  background: rgba(var(--v-theme-primary, 124, 92, 252), .10);
-}
-.strm-task-text { font-size: 12.5px; white-space: nowrap; }
-.strm-task-bar {
-  flex: 1; height: 6px; border-radius: 999px; overflow: hidden;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-}
-.strm-task-bar i {
-  display: block; height: 100%;
-  background: linear-gradient(90deg, #8B5CF6, rgb(var(--v-theme-primary, 124, 92, 252)), #3B82F6);
-  transition: width .3s;
-}
-/* 队列长度不可预知（事件会持续灌入），因此这里用不确定进度条而不是百分比 */
-.strm-task-bar.is-live i {
-  width: 35%; transition: none;
-  animation: strm-slide 1.15s ease-in-out infinite;
-}
-@keyframes strm-slide {
-  0% { margin-left: -35%; }
-  100% { margin-left: 100%; }
-}
-
-.strm-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
-.strm-tab {
-  padding: 6px 14px; border-radius: 9px; font-size: 13px; font-family: inherit; cursor: pointer;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .12);
+.strm-scan-menu > button {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 9px;
   background: transparent;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .72));
+  border: 0;
+  border-radius: 5px;
+  text-align: left;
 }
-.strm-tab.active {
-  background: rgb(var(--v-theme-primary, 124, 92, 252));
-  border-color: rgb(var(--v-theme-primary, 124, 92, 252));
-  color: #fff; font-weight: 600;
+.strm-scan-menu > button:hover {
+  background: var(--strm-wash);
 }
-
-.strm-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+.strm-scan-menu b {
+  font-size: 12px;
+  font-weight: 550;
+  display: block;
+}
+.strm-scan-menu em {
+  font-size: 10px;
+  color: var(--strm-muted);
+  font-style: normal;
+  display: block;
+  margin-top: 2px;
+}
+.strm-scan-menu .strm-scan-overwrite {
+  border-top: 1px solid var(--strm-line);
+  border-radius: 0 0 5px 5px;
+  margin-top: 3px;
+  padding-top: 13px;
+}
+.strm-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 15px;
+  flex-shrink: 0;
+  margin-bottom: 28px;
+}
 .strm-stat {
-  position: relative; overflow: hidden;
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 16px; border-radius: 13px;
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  cursor: pointer; font-family: inherit; text-align: left;
-  transition: border-color .18s, transform .18s, box-shadow .18s;
+  text-align: left;
+  padding: 15px 18px 12px;
+  border: 1px solid var(--strm-line);
+  border-radius: 9px;
+  background: var(--strm-surface);
+  position: relative;
+  overflow: hidden;
+  transition:
+    border 0.15s,
+    box-shadow 0.15s;
 }
-/* 顶部彩条：hover 时从左向右展开，提示「这张卡可点」 */
-.strm-stat::before {
-  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-  background: linear-gradient(90deg, var(--strm-accent, rgb(var(--v-theme-primary, 124, 92, 252))), transparent);
-  transform: scaleX(0); transform-origin: left; opacity: 0;
-  transition: transform .22s ease, opacity .22s ease;
+.strm-stat:hover,
+.strm-stat.active {
+  border-color: color-mix(in srgb, var(--strm-primary) 45%, var(--strm-line));
+  box-shadow: 0 2px 9px #00000005;
 }
-.strm-stat:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(10, 11, 20, .14); }
-.strm-stat:hover::before { transform: scaleX(1); opacity: 1; }
-.strm-stat.active { border-color: rgb(var(--v-theme-primary, 124, 92, 252)); box-shadow: 0 0 0 3px rgba(var(--v-theme-primary, 124, 92, 252), .14); }
-/* KPI 渐变数字：同色系深→浅渐变，视觉重量高于文字标签 */
-.strm-stat b {
-  font-size: 24px; font-weight: 800; line-height: 1; letter-spacing: -.5px;
+.strm-stat-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--strm-muted);
+  font-size: 12px;
+}
+.strm-stat-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--strm-primary);
+  background: var(--strm-tint);
+}
+.strm-stat.is-pending .strm-stat-icon {
+  background: #bf8e3b0d;
+  color: #ba8d45;
+}
+.strm-stat.is-failed .strm-stat-icon {
+  background: #c66e680d;
+  color: #bc746d;
+}
+.strm-stat-number {
+  font-size: 31px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -1px;
   font-variant-numeric: tabular-nums;
-  background: linear-gradient(135deg, var(--strm-accent2, currentColor) 0%, var(--strm-accent, currentColor) 100%);
-  -webkit-background-clip: text; background-clip: text;
-  -webkit-text-fill-color: transparent;
+  margin: 0 0 10px;
 }
-.strm-stat span {
-  font-size: 12px; font-weight: 600;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .62));
+.strm-stat-number small {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--strm-muted);
+  margin-left: 8px;
 }
-.strm-stat-dot {
-  margin-left: auto; width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
-  background: var(--strm-accent, rgb(var(--v-theme-primary, 124, 92, 252)));
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--strm-accent, #7C5CFC) 16%, transparent);
+.strm-stat-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--strm-muted);
+  font-size: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--strm-line);
 }
-.strm-stat.is-pending { --strm-accent: #EA8A1F; --strm-accent2: #FBBF24; }
-.strm-stat.is-scraped { --strm-accent: #16A34A; --strm-accent2: #4ADE80; }
-.strm-stat.is-failed { --strm-accent: #E5484D; --strm-accent2: #FB7185; }
-
-/* 骨架屏：渐变扫光，扫描监控目录时不留大片空白 */
-.strm-skel-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px 16px;
+.strm-stat-bottom span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
-.strm-skel { display: flex; flex-direction: column; gap: 8px; }
-.strm-skel-poster {
-  aspect-ratio: 2 / 3; border-radius: 14px;
-  background: linear-gradient(90deg,
-    rgba(var(--v-theme-on-surface, 27, 29, 41), .06) 25%,
-    rgba(var(--v-theme-on-surface, 27, 29, 41), .12) 37%,
-    rgba(var(--v-theme-on-surface, 27, 29, 41), .06) 63%);
-  background-size: 400% 100%;
-  animation: strm-shimmer 1.4s ease infinite;
+.strm-stat-bottom i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #7aa48c;
 }
-.strm-skel-line {
-  height: 10px; border-radius: 6px;
-  background: linear-gradient(90deg,
-    rgba(var(--v-theme-on-surface, 27, 29, 41), .06) 25%,
-    rgba(var(--v-theme-on-surface, 27, 29, 41), .12) 37%,
-    rgba(var(--v-theme-on-surface, 27, 29, 41), .06) 63%);
-  background-size: 400% 100%;
-  animation: strm-shimmer 1.4s ease infinite;
+.strm-stat.is-pending .strm-stat-bottom i {
+  background: #bc9b67;
 }
-.strm-skel-line.is-short { width: 55%; }
-@keyframes strm-shimmer {
-  0% { background-position: 100% 50%; }
-  100% { background-position: 0 50%; }
+.strm-stat.is-failed .strm-stat-bottom i {
+  background: #bd817b;
 }
-
-/* F2 分类筛选行：一级分类 + 二级分类常显 chip，与搜索框分行，点击即过滤海报墙 */
-.strm-cats { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-.strm-cats-label {
-  font-size: 12px; flex-shrink: 0;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .6));
+.strm-stat-bottom > svg {
+  opacity: 0.5;
 }
-.strm-cats .strm-cat:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .4); }
-/* 折叠箭头：全量扫描菜单与队列面板共用 */
-.strm-caret { display: inline-block; font-size: 9px; line-height: 1; transition: transform .18s; }
-.strm-caret.is-open { transform: rotate(180deg); }
-.strm-cat {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 12px; border-radius: 999px; font-size: 12.5px; font-family: inherit; cursor: pointer;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .12);
-  background: transparent;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .78));
+.strm-library-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-shrink: 0;
 }
-.strm-cat i { width: 8px; height: 8px; border-radius: 50%; background: var(--cat-color, currentColor); }
-.strm-cat em { font-style: normal; opacity: .7; font-size: 11px; }
-.strm-cat b { font-weight: 600; font-size: 11px; color: #EA8A1F; }
-.strm-cat.active {
-  background: rgb(var(--v-theme-primary, 124, 92, 252));
-  border-color: rgb(var(--v-theme-primary, 124, 92, 252));
-  color: #fff; font-weight: 600;
+.strm-library-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
 }
-.strm-cat.active i { background: #fff; }
-.strm-cat.active b { color: #FDE68A; }
-
-.strm-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-.strm-seg {
-  display: flex; gap: 2px; padding: 3px; border-radius: 11px;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .05);
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  margin-left: 2px; flex-shrink: 0;
+.strm-library-title h2 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.25px;
 }
-.strm-seg-item {
-  padding: 6px 14px; border: none; border-radius: 8px;
-  font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer; background: transparent;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .68));
-  transition: background .15s, color .15s, box-shadow .15s;
+.strm-library-title > span {
+  font-size: 10px;
+  border: 1px solid var(--strm-line);
+  padding: 0 6px;
+  border-radius: 4px;
+  color: var(--strm-muted);
 }
-.strm-seg-item.active {
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+.strm-filter-chip {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  font-size: 10px !important;
+  border: 0;
+  border-radius: 4px;
+  color: var(--strm-primary) !important;
+  padding: 3px 6px;
+  background: var(--strm-tint);
+}
+.strm-updated {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--strm-muted);
+}
+.strm-updated i {
+  width: 4px;
+  height: 4px;
+  background: #a2aaa5;
+  border-radius: 50%;
+}
+.strm-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 20px;
+  flex-shrink: 0;
+}
+.strm-search-wrap {
+  min-width: 0;
+  width: min(390px, 52%);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--strm-surface);
+  border: 1px solid var(--strm-line);
+  padding: 0 11px;
+  height: 35px;
+  border-radius: 6px;
+  color: var(--strm-muted);
+}
+.strm-search-wrap:focus-within {
+  border-color: color-mix(in srgb, var(--strm-primary) 60%, var(--strm-line));
 }
 .strm-search {
-  flex: 1; min-width: 180px; padding: 9px 13px; font-size: 13px; font-family: inherit;
-  border-radius: 11px; outline: none;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
-  transition: border-color .15s, box-shadow .15s;
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  padding: 0;
+  border: 0;
+  outline: none !important;
+  font-size: 11px !important;
 }
-.strm-search:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .4); }
-.strm-search:focus {
-  border-color: rgb(var(--v-theme-primary, 124, 92, 252));
-  box-shadow: 0 0 0 3px rgba(var(--v-theme-primary, 124, 92, 252), .15);
+.strm-search::placeholder {
+  color: var(--strm-muted);
+  opacity: 0.8;
 }
-.strm-count {
-  font-size: 12.5px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .6));
+.strm-search-key {
+  font-size: 9px;
+  border: 1px solid var(--strm-line);
+  padding: 0 3px;
+  border-radius: 3px;
+  white-space: nowrap;
+  opacity: 0.65;
 }
-
-.strm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px 16px; }
-.strm-card { display: flex; flex-direction: column; cursor: pointer; }
+.strm-toolbar-right {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  gap: 12px;
+}
+.strm-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--strm-muted);
+}
+.strm-sort select {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 5px 0;
+  outline: none;
+  cursor: pointer;
+  font-size: 11px;
+}
+.strm-sort select option {
+  background: var(--strm-surface);
+  color: var(--strm-text);
+}
+.strm-view-toggle {
+  display: flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--strm-surface) 92%, var(--strm-text));
+}
+.strm-view-toggle button {
+  border: 0;
+  background: transparent;
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 25px;
+  color: var(--strm-muted);
+}
+.strm-view-toggle button.active {
+  background: var(--strm-surface);
+  box-shadow: 0 1px 3px #0000000e;
+  color: var(--strm-primary);
+}
+.strm-content {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  scrollbar-width: thin;
+  padding: 1px 2px 20px;
+  margin: -1px -2px 0;
+}
+.strm-grid,
+.strm-skel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(149px, 1fr));
+  gap: 24px 18px;
+}
+.strm-card {
+  min-width: 0;
+}
+.strm-poster-wrap {
+  position: relative;
+}
 .strm-poster {
-  position: relative; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 14px;
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  transition: transform .18s ease, box-shadow .18s ease;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border: 0;
+  padding: 0;
+  display: block;
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  text-align: left;
+  box-shadow: 0 2px 5px #00000008;
+  isolation: isolate;
 }
-.strm-card:hover .strm-poster { transform: translateY(-5px); box-shadow: 0 18px 40px rgba(10, 11, 20, .34), 0 0 0 1px rgba(var(--v-theme-primary, 124, 92, 252), .35); }
-.strm-poster-img {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  object-fit: cover; display: block; background: transparent;
-}
-.strm-type {
-  position: absolute; top: 9px; left: 9px; padding: 3px 9px; border-radius: 999px;
-  font-size: 11px; font-weight: 600; background: rgba(255, 255, 255, .92);
-}
-.strm-type.is-mv { color: #3B82F6; }
-.strm-type.is-tv { color: #EC4899; }
-.strm-type.is-mu { color: #8B5CF6; }
-.strm-dot { position: absolute; top: 12px; right: 12px; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 3px rgba(0, 0, 0, .32); }
-.strm-dot.is-ok { background: #16A34A; }
-.strm-dot.is-fail { background: #E5484D; }
-.strm-dot.is-busy { background: #EA8A1F; animation: strm-pulse 1s ease-in-out infinite; }
-.strm-dot.is-skip { background: #94A3B8; }
-.strm-dot.is-none { background: transparent; border: 1.5px solid rgba(255, 255, 255, .9); }
-/* 失败红条：贴海报底边，一眼看出「这条刮挂了」 */
-.strm-fail-strip {
-  position: absolute; left: 0; right: 0; bottom: 0; padding: 5px 10px;
-  font-size: 11px; font-weight: 600; color: #fff; z-index: 2;
-  background: rgba(229, 72, 77, .92);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-/* hover 浮层：覆盖海报，承载元信息与操作，Plex 式「悬停才知道更多」 */
-.strm-overlay {
-  position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
-  justify-content: flex-end; padding: 12px;
-  background: linear-gradient(180deg, transparent 35%, rgba(10, 11, 20, .88) 100%);
-  opacity: 0; transition: opacity .18s ease;
-}
-.strm-card:hover .strm-overlay { opacity: 1; }
-.strm-overlay-title { font-size: 14px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strm-overlay-meta { font-size: 11.5px; color: rgba(255, 255, 255, .72); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strm-overlay-status { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #fff; margin-top: 8px; }
-.strm-overlay-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.strm-overlay-dot.is-ok { background: #34D399; }
-.strm-overlay-dot.is-fail { background: #F87171; }
-.strm-overlay-dot.is-busy { background: #FBBF24; }
-.strm-overlay-dot.is-skip { background: #94A3B8; }
-.strm-overlay-dot.is-none { background: transparent; border: 1.5px solid #fff; }
-.strm-overlay-actions { display: flex; gap: 7px; margin-top: 10px; }
-.strm-overlay-btn {
-  flex: 1; padding: 7px 8px; border-radius: 8px; font-size: 12px; font-weight: 600;
-  font-family: inherit; cursor: pointer; border: none;
-  background: rgba(255, 255, 255, .18); color: #fff;
-}
-.strm-overlay-btn:hover { background: rgba(255, 255, 255, .3); }
-.strm-overlay-btn.is-primary { background: rgb(var(--v-theme-primary, 124, 92, 252)); color: #fff; }
-.strm-overlay-btn.is-primary:hover { filter: brightness(1.1); }
-.strm-overlay-btn:disabled { opacity: .45; cursor: not-allowed; }
-.strm-card-title { margin-top: 9px; font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strm-card-sub {
-  margin-top: 2px; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
-}
-
-.strm-empty {
-  text-align: center; padding: 48px 0; font-size: 13px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
-}
-/* 空态图标：径向渐变圆底 + 主题色描边 emoji，给「暂无数据」一个视觉落点 */
-.strm-empty::before {
-  content: "🎞️"; display: grid; place-items: center;
-  width: 52px; height: 52px; margin: 0 auto 12px;
-  border-radius: 50%; font-size: 22px;
-  background: radial-gradient(circle at 30% 25%,
-    rgba(var(--v-theme-primary, 124, 92, 252), .22), rgba(var(--v-theme-primary, 124, 92, 252), .06));
-  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary, 124, 92, 252), .18);
-}
-
-/* 内联详情：Plex 式 Hero + 季切换 + 集列表（不用 fixed 抽屉，避免与宿主 VDialog 层叠上下文冲突） */
-.strm-detail {
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  border-radius: 16px; overflow: hidden;
-  /* 显式声明前景色：本容器内的文字一律按自己的主题变量求值，
-     不依赖宿主 .v-card 的继承结果（毛玻璃/纯白/暗色三主题下才不会出现浅字压浅底） */
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-}
-
-/* 详情 Hero：Plex 式沉浸横幅。海报既是海报也是背景氛围层，底下垫一层主色渐变，
-   再叠底部压暗 scrim 保证白字可读。横幅恒定深色（对齐设计稿），内部一律白色系，
-   不跟随宿主三主题 —— 深色底 + 白字在任何主题下都是同一份视觉 */
-.strm-dhero {
-  position: relative; overflow: hidden; min-height: 232px;
-  display: flex; flex-direction: column; justify-content: flex-end;
-  padding: 48px 20px 20px;
-  background: linear-gradient(120deg, rgb(var(--v-theme-primary, 124, 92, 252)) -40%, #1b2740 58%, #0d1119 100%);
-  color: #fff;
-}
-.strm-dhero-bg {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  object-fit: cover; transform: scale(1.24);
-  filter: blur(24px) saturate(1.35); opacity: .58;
+.strm-poster::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(180deg, #00000012, transparent 45%, #00000057);
   pointer-events: none;
 }
+.strm-poster-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  transition:
+    transform 0.35s,
+    filter 0.35s;
+}
+.strm-poster:hover .strm-poster-img {
+  transform: scale(1.045);
+  filter: brightness(0.72);
+}
+.strm-poster-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+  gap: 15px;
+  text-align: center;
+  color: #ffffffbd;
+}
+.strm-poster-fallback b {
+  font-size: 16px;
+  font-weight: 500;
+}
+.strm-poster-status {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 6px;
+  border: 1px solid #ffffff25;
+  font-size: 9px;
+  color: white;
+  background: #20302bd9;
+  border-radius: 4px;
+  backdrop-filter: blur(12px);
+}
+.strm-poster-status.is-none {
+  background: #3d3629cc;
+}
+.strm-poster-status.is-fail {
+  background: #a24e47e8;
+}
+.strm-poster-status.is-busy {
+  background: #aa8733e8;
+}
+.strm-poster-status i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #e6c993;
+  margin: 0 2px;
+}
+.strm-type {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  color: white;
+  background: #ffffff20;
+  border: 1px solid #ffffff33;
+  font-size: 9px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  backdrop-filter: blur(9px);
+}
+.strm-poster-open {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.strm-poster-open > svg {
+  box-sizing: content-box;
+  padding: 14px;
+  border: 1px solid #ffffff55;
+  background: #ffffff15;
+  border-radius: 50%;
+  backdrop-filter: blur(6px);
+}
+.strm-poster:hover .strm-poster-open,
+.strm-poster:focus-visible .strm-poster-open {
+  opacity: 1;
+}
+.strm-fail-strip {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 6px 9px;
+  background: #9a5549e0;
+  color: white;
+  font-size: 9px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.strm-poster:has(.strm-fail-strip) .strm-type {
+  bottom: 36px;
+}
+.strm-card-info {
+  padding-top: 9px;
+}
+.strm-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.strm-card-title {
+  display: block;
+  text-align: left;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font-size: 12px !important;
+  font-weight: 550 !important;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+  letter-spacing: 0.1px;
+}
+.strm-card-title:hover {
+  color: var(--strm-primary);
+}
+.strm-card-go {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border: 0;
+  background: transparent;
+  border-radius: 4px;
+  color: var(--strm-muted) !important;
+  opacity: 0.3;
+}
+.strm-card:hover .strm-card-go,
+.strm-card-go:focus-visible {
+  opacity: 1;
+}
+.strm-card-go:hover {
+  background: var(--strm-tint);
+  color: var(--strm-primary) !important;
+}
+.strm-card-sub {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  font-size: 10px;
+  color: var(--strm-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+.strm-card-sub i {
+  width: 2px;
+  height: 2px;
+  background: currentColor;
+  opacity: 0.6;
+  border-radius: 50%;
+}
+.strm-grid.is-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--strm-surface);
+  border: 1px solid var(--strm-line);
+  border-radius: 8px;
+}
+.strm-grid.is-list .strm-card {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--strm-line);
+}
+.strm-grid.is-list .strm-card:last-child {
+  border: 0;
+}
+.strm-grid.is-list .strm-poster-wrap {
+  width: 44px;
+  flex: 0 0 44px;
+}
+.strm-grid.is-list .strm-poster {
+  border-radius: 4px;
+}
+.strm-grid.is-list .strm-type,
+.strm-grid.is-list .strm-poster-status,
+.strm-grid.is-list .strm-fail-strip,
+.strm-grid.is-list .strm-poster-open {
+  display: none;
+}
+.strm-grid.is-list .strm-card-info {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+.strm-grid.is-list .strm-card-heading {
+  justify-content: flex-start;
+}
+.strm-grid.is-list .strm-card-title {
+  flex: initial;
+  max-width: calc(100% - 28px);
+  font-size: 13px !important;
+}
+.strm-grid.is-list .strm-card-go {
+  margin-left: 5px;
+  opacity: 0.6;
+}
+.strm-card-path {
+  display: block;
+  font-size: 10px;
+  color: var(--strm-muted);
+  opacity: 0.6;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strm-list-card-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.strm-list-card-meta small {
+  color: var(--strm-muted);
+  font-size: 10px;
+}
+.strm-library-foot {
+  margin-top: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--strm-muted);
+  font-size: 9px;
+  padding: 13px 0;
+  border-top: 1px solid var(--strm-line);
+}
+.strm-library-foot > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 0.7;
+}
+.strm-footer-dot {
+  margin: 0 8px;
+  opacity: 0.4;
+}
+.strm-skel-poster {
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  background: linear-gradient(
+    110deg,
+    var(--strm-line) 30%,
+    var(--strm-surface) 50%,
+    var(--strm-line) 70%
+  );
+  background-size: 220% 100%;
+  animation: strm-shimmer 1.6s infinite;
+}
+.strm-skel-line {
+  height: 10px;
+  width: 75%;
+  margin-top: 10px;
+  border-radius: 3px;
+  background: var(--strm-line);
+}
+.strm-skel-line.is-short {
+  width: 50%;
+  height: 6px;
+  margin-top: 8px;
+}
+.strm-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 240px;
+  color: var(--strm-muted);
+  text-align: center;
+  padding: 25px;
+  font-size: 12px;
+}
+.strm-empty h3 {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--strm-text);
+}
+.strm-empty p {
+  font-size: 12px;
+}
+.strm-empty-icon {
+  width: 66px;
+  height: 66px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  background: var(--strm-tint);
+  color: var(--strm-primary);
+  margin-bottom: 4px;
+}
+.strm-alert {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  margin-bottom: 16px;
+  border-radius: 7px;
+  font-size: 12px;
+  flex-shrink: 0;
+  border: 1px solid;
+}
+.strm-alert > span {
+  flex: 1;
+}
+.strm-alert.is-error {
+  color: #b55b53;
+  background: color-mix(in srgb, #b55b53 6%, var(--strm-surface));
+  border-color: #b55b5325;
+}
+.strm-alert.is-ok {
+  color: var(--strm-primary);
+  background: var(--strm-tint);
+  border-color: color-mix(in srgb, var(--strm-primary) 15%, transparent);
+}
+.strm-mini {
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 4px;
+  font-size: 11px !important;
+  background: transparent;
+  color: var(--strm-primary) !important;
+  white-space: nowrap;
+}
+.strm-mini:hover {
+  background: var(--strm-tint);
+}
+/* 详情：保留单季、单集与多版本操作。 */
+.strm-detail {
+  padding-bottom: 25px;
+}
+.strm-dhero {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  color: white;
+  background: #273b33;
+  padding: 19px 24px 25px;
+  isolation: isolate;
+}
+.strm-dhero-bg {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 40%;
+  inset: 0;
+  filter: blur(25px);
+  opacity: 0.23;
+  z-index: -2;
+}
 .strm-dhero-scrim {
-  position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(180deg,
-    rgba(8, 10, 16, .10) 0%,
-    rgba(8, 10, 16, .54) 56%,
-    rgba(8, 10, 16, .86) 100%);
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #172b25d9, #1a2827b0);
+  z-index: -1;
 }
 .strm-back {
-  position: absolute; top: 14px; left: 16px; z-index: 3;
-  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
-  padding: 5px 13px 5px 9px; border-radius: 999px;
-  font-family: inherit; font-size: 12px;
-  border: 1px solid rgba(255, 255, 255, .26);
-  background: rgba(10, 12, 18, .42);
-  color: rgba(255, 255, 255, .92);
-  transition: background .15s, border-color .15s, color .15s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px !important;
+  color: #ffffffb3 !important;
+  background: transparent;
+  border: 0;
+  padding: 0 0 20px;
 }
-.strm-back:hover { background: rgba(10, 12, 18, .64); border-color: rgba(255, 255, 255, .46); color: #fff; }
-.strm-back-arrow { font-size: 13px; line-height: 1; }
-.strm-dhero-body { position: relative; z-index: 1; display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap; }
+.strm-back:hover {
+  color: white !important;
+}
+.strm-back-arrow {
+  font-size: 17px;
+}
+.strm-dhero-body {
+  display: flex;
+  align-items: center;
+  gap: 25px;
+}
 .strm-dhero-poster {
-  position: relative; width: 128px; height: 192px; flex: none;
-  border-radius: 12px; overflow: hidden;
-  background: rgba(255, 255, 255, .08);
-  outline: 1px solid rgba(255, 255, 255, .2);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, .5);
+  width: 112px;
+  flex-shrink: 0;
+  aspect-ratio: 2 / 3;
+  position: relative;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 7px 20px #00000033;
+  isolation: isolate;
 }
-.strm-dhero-info { flex: 1; min-width: 240px; }
+.strm-dhero-info {
+  min-width: 0;
+  flex: 1;
+}
 .strm-dhero-kicker {
-  font-size: 11px; font-weight: 600; letter-spacing: 1.4px; text-transform: uppercase;
-  color: rgba(255, 255, 255, .68); margin-bottom: 9px;
+  font-size: 11px;
+  color: #ffffff8a;
+  letter-spacing: 1px;
+  margin-bottom: 7px;
 }
-/* 显式声明 color：宿主对 h2 有全局样式，不会继承插件容器的主题变量 */
 .strm-dhero-info h2 {
-  font-size: 27px; font-weight: 800; letter-spacing: -.6px; line-height: 1.15;
-  margin: 0 0 12px; color: #fff; text-shadow: 0 2px 20px rgba(0, 0, 0, .35);
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  margin-bottom: 13px;
 }
-.strm-dhero-tags { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
-.strm-dhero-tags .strm-tag {
-  background: rgba(255, 255, 255, .16); color: #fff;
-  border: 1px solid rgba(255, 255, 255, .16);
+.strm-dhero-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.strm-dhero-tags .strm-tag.is-ok { background: rgba(52, 211, 153, .22); color: #b7f4da; border-color: rgba(52, 211, 153, .32); }
-.strm-dhero-tags .strm-tag.is-fail { background: rgba(248, 113, 113, .22); color: #ffd2d2; border-color: rgba(248, 113, 113, .34); }
-.strm-dhero-tags .strm-tag.is-busy { background: rgba(251, 191, 36, .22); color: #ffe6ae; border-color: rgba(251, 191, 36, .34); }
-.strm-dhero-tags .strm-tag.is-skip,
-.strm-dhero-tags .strm-tag.is-none { background: rgba(255, 255, 255, .14); color: rgba(255, 255, 255, .84); }
-.strm-dhero-times {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin-top: 11px; font-size: 12px; font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, .74);
-}
-.strm-dhero-times b { font-weight: 600; margin-right: 5px; color: rgba(255, 255, 255, .94); }
-.strm-sep { opacity: .38; }
-.strm-dhero-path {
-  margin-top: 8px; font-size: 11.5px;
-  color: rgba(255, 255, 255, .6);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.strm-dhero-actions { display: flex; gap: 8px; align-items: center; margin-left: auto; padding-bottom: 2px; }
-.strm-dhero-actions .strm-btn { flex: 0 0 auto; }
-/* 横幅内的主 CTA 走白底（Plex / 设计稿口径），与页面主色按钮区分层级 */
-.strm-dhero-actions .strm-btn:not(.ghost) {
-  background: #fff; border-color: #fff; color: #0c1220; font-weight: 600;
-}
-.strm-dhero-actions .strm-btn.ghost {
-  background: rgba(255, 255, 255, .16); border-color: rgba(255, 255, 255, .3); color: #fff;
-}
-
 .strm-tag {
-  display: inline-flex; align-items: center;
-  border-radius: 999px; padding: 3px 10px; font-size: 11.5px;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .07);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--strm-line);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--strm-muted);
+  font-size: 10px;
+  white-space: nowrap;
 }
-.strm-tag.is-mv { background: rgba(59, 130, 246, .14); color: #3B82F6; }
-.strm-tag.is-tv { background: rgba(236, 72, 153, .14); color: #EC4899; }
-.strm-tag.is-mu { background: rgba(139, 92, 246, .16); color: #8B5CF6; }
-.strm-tag.is-ok { background: rgba(22, 163, 74, .13); color: #16A34A; }
-.strm-tag.is-fail { background: rgba(229, 72, 77, .13); color: #E5484D; }
-.strm-tag.is-warn { background: rgba(234, 138, 31, .16); color: #EA8A1F; }
-.strm-tag.is-busy { background: rgba(234, 138, 31, .16); color: #EA8A1F; }
-.strm-tag.is-skip { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .08); color: rgba(var(--v-theme-on-surface, 27, 29, 41), .6); }
-.strm-tag.is-none { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .07); color: rgba(var(--v-theme-on-surface, 27, 29, 41), .55); }
-.strm-status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 4px; vertical-align: 1px; }
-.strm-tag.is-plain { color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .7)); }
-
-/* 季切换：胶囊 + 计数角标，激活态走宿主主色 */
+.strm-tag.is-ok {
+  background: #529b7310;
+  color: #649879;
+  border-color: #529b7325;
+}
+.strm-tag.is-fail {
+  background: #bc746d10;
+  color: #b46a64;
+  border-color: #bc746d25;
+}
+.strm-tag.is-busy,
+.strm-tag.is-warn {
+  background: #bf9b5610;
+  color: #b18e4c;
+  border-color: #bf9b5625;
+}
+.strm-dhero .strm-tag {
+  color: #ffffffba;
+  border-color: #ffffff22;
+  background: #ffffff0b;
+}
+.strm-dhero .strm-tag.is-ok {
+  color: #a8d6bb;
+}
+.strm-dhero .strm-tag.is-fail {
+  color: #efb4ad;
+}
+.strm-status-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.strm-dhero-times {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #ffffff79;
+  font-size: 10px;
+  margin-top: 15px;
+  flex-wrap: wrap;
+}
+.strm-dhero-times b {
+  font-weight: 400;
+  margin-right: 7px;
+  color: #ffffffad;
+}
+.strm-dhero-path {
+  color: #ffffff62;
+  font-size: 10px;
+  margin-top: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strm-dhero-actions {
+  align-self: flex-end;
+  margin-left: auto;
+}
+.strm-dhero-actions .strm-btn {
+  background: #ffffff16;
+  border-color: #ffffff4a;
+}
 .strm-season-bar {
-  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 12px 18px;
-  border-top: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .07);
-  border-bottom: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .09);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 22px 0 16px;
+  overflow-x: auto;
 }
 .strm-season-label {
-  font-size: 10.5px; font-weight: 600; letter-spacing: 1px; margin-right: 2px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .5));
+  font-size: 10px;
+  color: var(--strm-muted);
+  letter-spacing: 1px;
+  margin-right: 8px;
 }
 .strm-season-chip {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 6px 12px; border-radius: 999px; font-size: 12.5px; font-family: inherit; cursor: pointer; white-space: nowrap;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
-  background: transparent; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .72);
-  transition: border-color .15s, color .15s, background .15s;
-}
-.strm-season-chip:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .45); }
-.strm-season-chip em {
-  font-style: normal; font-size: 10.5px; font-variant-numeric: tabular-nums;
-  padding: 1px 6px; border-radius: 999px;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .09);
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), .62);
+  border: 1px solid var(--strm-line);
+  background: var(--strm-surface);
+  border-radius: 5px;
+  white-space: nowrap;
+  padding: 6px 11px;
+  font-size: 11px !important;
 }
 .strm-season-chip.active {
-  background: rgb(var(--v-theme-primary, 124, 92, 252));
-  border-color: rgb(var(--v-theme-primary, 124, 92, 252));
-  color: #fff; font-weight: 600;
-  box-shadow: 0 4px 14px rgba(var(--v-theme-primary, 124, 92, 252), .3);
+  background: var(--strm-tint);
+  border-color: color-mix(in srgb, var(--strm-primary) 25%, transparent);
+  color: var(--strm-primary);
 }
-.strm-season-chip.active em { background: rgba(255, 255, 255, .24); color: #fff; }
-.strm-list-actions { display: flex; align-items: center; gap: 8px; padding: 11px 18px 2px; }
+.strm-season-chip em {
+  font-size: 9px;
+  font-style: normal;
+  margin-left: 8px;
+  opacity: 0.5;
+}
+.strm-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 15px 0 12px;
+}
 .strm-list-sum {
-  margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .6));
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--strm-muted);
 }
-.strm-list-sum b { font-weight: 700; }
-.strm-mini {
-  padding: 5px 11px; border-radius: 9px; font-size: 12px; font-family: inherit; cursor: pointer;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
-  background: transparent; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .72);
+.strm-list-sum b {
+  font-weight: 500;
+  color: var(--strm-text);
 }
-.strm-mini:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .4); color: rgb(var(--v-theme-primary, 124, 92, 252)); }
-.strm-mini:disabled { opacity: .45; cursor: not-allowed; }
-.strm-list { max-height: 46vh; overflow-y: auto; padding: 8px 18px 14px; }
+.strm-list {
+  background: var(--strm-surface);
+  border: 1px solid var(--strm-line);
+  border-radius: 8px;
+  overflow: hidden;
+}
 .strm-row {
+  display: flex;
+  gap: 13px;
+  align-items: center;
+  padding: 14px 17px;
   position: relative;
-  display: flex; align-items: center; gap: 10px; padding: 9px 10px 9px 7px; border-radius: 11px;
-  border: 1px solid transparent;
-  transition: background .14s, border-color .14s;
+  border-bottom: 1px solid var(--strm-line);
 }
-/* 行首状态色条：一眼扫出哪几集有问题，颜色跟状态语义走 */
-.strm-row-bar {
-  width: 3px; height: 22px; border-radius: 999px; flex-shrink: 0;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .16);
+.strm-row:last-child {
+  border: 0;
 }
-.strm-row.is-ok .strm-row-bar { background: #16A34A; }
-.strm-row.is-fail .strm-row-bar { background: #E5484D; }
-.strm-row.is-busy .strm-row-bar { background: #EA8A1F; animation: strm-pulse 1s ease-in-out infinite; }
-.strm-row.is-skip .strm-row-bar { background: #94A3B8; }
-.strm-row:hover { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .045); }
 .strm-row.is-selected {
-  background: rgba(var(--v-theme-primary, 124, 92, 252), .10);
-  border-color: rgba(var(--v-theme-primary, 124, 92, 252), .30);
+  background: var(--strm-tint);
 }
-.strm-row input { width: 15px; height: 15px; flex-shrink: 0; accent-color: rgb(var(--v-theme-primary, 124, 92, 252)); cursor: pointer; }
+.strm-row input {
+  accent-color: var(--strm-primary);
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+.strm-row-bar {
+  width: 2px;
+  height: 16px;
+  position: absolute;
+  left: 0;
+  border-radius: 2px;
+  background: #729c81;
+  opacity: 0.7;
+}
+.strm-row.is-fail .strm-row-bar {
+  background: #b4776e;
+}
+.strm-row.is-none .strm-row-bar {
+  background: #d2bd8e;
+}
 .strm-row-no {
-  width: 52px; flex-shrink: 0; font-size: 12.5px; font-weight: 700;
-  font-variant-numeric: tabular-nums; color: rgb(var(--v-theme-primary, 124, 92, 252));
+  font: 10px monospace;
+  color: var(--strm-muted);
+  width: 30px;
+  flex-shrink: 0;
 }
-.strm-row-no.is-plain { color: rgba(var(--v-theme-on-surface, 27, 29, 41), .62); }
+.strm-row-no.is-plain {
+  width: 64px;
+}
 .strm-row-name {
-  flex: 1; min-width: 0; font-size: 12.5px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-size: 12px;
 }
 .strm-row-size {
-  width: 68px; flex-shrink: 0; text-align: right; font-size: 11.5px; font-variant-numeric: tabular-nums;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .55));
+  color: var(--strm-muted);
+  font-size: 10px;
+  width: 50px;
+  text-align: right;
+  flex-shrink: 0;
 }
-.strm-row-state { width: 74px; flex-shrink: 0; display: flex; align-items: center; gap: 5px; font-size: 11.5px; }
-.strm-row-state i { width: 6px; height: 6px; border-radius: 50%; }
-.strm-row-state.is-ok { color: #16A34A; }
-.strm-row-state.is-ok i { background: #16A34A; }
-.strm-row-state.is-fail { color: #E5484D; }
-.strm-row-state.is-fail i { background: #E5484D; }
-.strm-row-state.is-busy { color: #EA8A1F; }
-.strm-row-state.is-busy i { background: #EA8A1F; animation: strm-pulse 1s ease-in-out infinite; }
-.strm-row-state.is-skip { color: #94A3B8; }
-.strm-row-state.is-skip i { background: #94A3B8; }
-.strm-row-state.is-none { color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .55)); }
-.strm-row-state.is-none i { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .28); }
-/* 行内「刮削」：常驻但压到背景层，指针扫过该行才提亮成主色，避免整列按钮抢视线 */
+.strm-row-state {
+  font-size: 10px;
+  color: var(--strm-muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 56px;
+  flex-shrink: 0;
+}
+.strm-row-state i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.strm-row-state.is-ok {
+  color: #729c81;
+}
+.strm-row-state.is-fail {
+  color: #b4776e;
+}
 .strm-row-go {
-  flex-shrink: 0; padding: 4px 10px; border-radius: 8px; font-size: 11.5px; font-family: inherit; cursor: pointer;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
+  font-size: 11px !important;
+  padding: 4px 10px;
+  border: 1px solid var(--strm-line);
   background: transparent;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), .6);
-  transition: color .14s, border-color .14s, background .14s;
+  border-radius: 4px;
+  color: var(--strm-primary) !important;
 }
-.strm-row:hover .strm-row-go {
-  border-color: rgba(var(--v-theme-primary, 124, 92, 252), .45);
-  color: rgb(var(--v-theme-primary, 124, 92, 252));
-}
-.strm-row-go:hover { background: rgba(var(--v-theme-primary, 124, 92, 252), .12); }
-.strm-row-go:disabled { opacity: .35; cursor: not-allowed; }
 .strm-detail-foot {
-  display: flex; align-items: center; gap: 10px; padding: 13px 18px;
-  border-top: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .02);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 17px;
 }
-.strm-sel { font-size: 12.5px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .72); }
-.strm-sel b { font-size: 14px; color: rgb(var(--v-theme-primary, 124, 92, 252)); }
-.strm-foot-right { margin-left: auto; display: flex; gap: 9px; }
-
-.strm-rec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.strm-rec-count { font-size: 13px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .65); }
-.strm-rec-count b { color: rgb(var(--v-theme-on-surface, 27, 29, 41)); font-variant-numeric: tabular-nums; }
-/* 时间轴式记录列表（v4）：左状态点 + 主内容两行，右侧结果徽章与时间 */
+.strm-sel {
+  color: var(--strm-muted);
+  font-size: 11px;
+}
+.strm-sel b {
+  color: var(--strm-primary);
+  font-weight: 500;
+}
+.strm-foot-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+/* 记录：用统一的边框、标签与时间列降低阅读噪音。 */
+.strm-rec-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 1px 0 19px;
+}
+.strm-rec-count {
+  font-size: 17px;
+  font-weight: 550;
+}
+.strm-rec-count b {
+  font-variant-numeric: tabular-nums;
+  font-weight: inherit;
+}
+.strm-rec-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  background: var(--strm-surface);
+  border: 1px solid var(--strm-line);
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 18px;
+}
+.strm-rec-filter select,
+.strm-rec-filter input {
+  background: var(--strm-wash);
+  border: 1px solid var(--strm-line);
+  border-radius: 4px;
+  padding: 6px 7px;
+  font-size: 11px;
+  min-width: 0;
+  color-scheme: normal;
+}
+.strm-rec-filter select option {
+  background: var(--strm-surface);
+}
+.strm-rec-filter-sep {
+  font-size: 10px;
+  color: var(--strm-muted);
+}
+.strm-rec-filter > button:last-child {
+  margin-left: auto;
+}
 .strm-rec-list {
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  border-radius: 14px; overflow: hidden;
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  max-height: 56vh; overflow-y: auto;
+  border: 1px solid var(--strm-line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 25px;
+  background: var(--strm-surface);
 }
 .strm-rec {
-  position: relative;
-  display: flex; align-items: flex-start; gap: 12px; padding: 11px 16px 11px 18px;
-  border-bottom: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .07);
-  font-size: 12.5px; transition: background .15s;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 18px;
+  border-bottom: 1px solid var(--strm-line);
 }
-/* 左侧状态色条：与状态点同色，扫一眼就知道这行结果 */
-.strm-rec::before {
-  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: #16A34A; opacity: .55;
+.strm-rec:last-child {
+  border: 0;
 }
-.strm-rec.is-fail::before { background: #E5484D; }
-.strm-rec:hover { background: rgba(var(--v-theme-primary, 124, 92, 252), .05); }
-.strm-rec:last-child { border-bottom: none; }
 .strm-rec-dot {
-  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px;
+  width: 7px;
+  height: 7px;
+  background: #81a98e;
+  box-shadow: 0 0 0 4px #81a98e10;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
-.strm-rec.is-ok .strm-rec-dot { background: #16A34A; box-shadow: 0 0 0 3px rgba(22, 163, 74, .13); }
-.strm-rec.is-fail .strm-rec-dot { background: #E5484D; box-shadow: 0 0 0 3px rgba(229, 72, 77, .13); }
-.strm-rec-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.strm-rec-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.strm-rec.is-fail .strm-rec-dot {
+  background: #bb7b73;
+  box-shadow: 0 0 0 4px #bb7b7310;
+}
+.strm-rec-main {
+  min-width: 0;
+  flex: 1;
+}
+.strm-rec-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
 .strm-rec-title {
-  max-width: 320px; font-weight: 600; font-size: 13px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.strm-rec-badge {
-  flex-shrink: 0; width: 44px; text-align: center; margin-top: 1px;
-  border-radius: 999px; padding: 2px 0; font-size: 11px; font-weight: 600;
-}
-.strm-rec-badge.is-ok { background: rgba(22, 163, 74, .13); color: #16A34A; }
-.strm-rec-badge.is-fail { background: rgba(229, 72, 77, .13); color: #E5484D; }
-.strm-rec-time {
-  flex-shrink: 0; width: 132px; text-align: right; margin-top: 1px; font-variant-numeric: tabular-nums;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .6));
+  font-size: 12px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .strm-rec-msg {
-  font-size: 12px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .55));
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px;
+  color: var(--strm-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 4px;
 }
-
-/* Hero 横幅：待处理概览 + 行动号召，Plex 首页横幅的克制版 */
-.strm-hero {
-  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-  margin-bottom: 16px; padding: 20px 22px; border-radius: 14px;
-  background:
-    linear-gradient(120deg, rgba(var(--v-theme-primary, 124, 92, 252), .16), transparent 55%),
-    rgb(var(--v-theme-surface, 255, 255, 255));
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
+.strm-rec-badge {
+  font-size: 10px;
+  color: #729c81;
+  border: 1px solid #729c8125;
+  border-radius: 4px;
+  padding: 2px 7px;
 }
-.strm-hero-body { flex: 1; min-width: 240px; }
-.strm-hero-kicker { font-size: 11px; letter-spacing: .6px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .55)); }
-.strm-hero-title { font-size: 19px; font-weight: 700; margin-top: 3px; }
-.strm-hero-title b { font-size: 22px; color: rgb(var(--v-theme-primary, 124, 92, 252)); font-variant-numeric: tabular-nums; }
-.strm-hero-title b.is-fail { color: #E5484D; }
-.strm-hero-sub { font-size: 12.5px; margin-top: 5px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), var(--v-medium-emphasis-opacity, .6)); }
-.strm-hero-actions { display: flex; gap: 9px; align-items: center; }
-
-/* F1/F5 统计 + 类型 + 状态筛选合并成一行可点击 chip */
-.strm-chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
-.strm-chip-sep {
-  width: 1px; height: 18px; flex-shrink: 0;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
+.strm-rec-badge.is-fail {
+  color: #b4776e;
+  border-color: #b4776e25;
 }
-button.strm-chip {
-  border: 1px solid transparent; cursor: pointer; font-family: inherit;
-  display: inline-flex; align-items: center; gap: 5px; line-height: 1.5;
+.strm-rec-time {
+  font-size: 10px;
+  color: var(--strm-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 118px;
+  text-align: right;
 }
-button.strm-chip b { font-weight: 700; font-variant-numeric: tabular-nums; }
-button.strm-chip:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .4); }
-button.strm-chip.is-count.is-movie { color: #3B82F6; }
-button.strm-chip.is-count.is-tv { color: #EC4899; }
-button.strm-chip.is-count.is-music { color: #8B5CF6; }
-button.strm-chip.is-status.is-scraped { background: rgba(22, 163, 74, .12); color: #16A34A; }
-button.strm-chip.is-status.is-failed { background: rgba(229, 72, 77, .12); color: #E5484D; }
-button.strm-chip.is-status.is-skipped { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .08); color: rgba(var(--v-theme-on-surface, 27, 29, 41), .6); }
-button.strm-chip.is-status.is-pending { background: rgba(234, 138, 31, .14); color: #EA8A1F; }
-button.strm-chip.is-count.active,
-button.strm-chip.is-status.active {
-  background: rgb(var(--v-theme-primary, 124, 92, 252));
-  border-color: rgb(var(--v-theme-primary, 124, 92, 252));
-  color: #fff;
+/* 任务抽屉始终留在组件内，联邦挂载不改变宿主滚动层级。 */
+.strm-queue-layer {
+  position: absolute;
+  z-index: 50;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
 }
-/* 零值 chip 降透明度，让行重心落在非零信息上（0 音乐/0 失败不再抢色底） */
-.strm-chip.is-zero:not(.active) { opacity: .42; }
-
-/* F2 面包屑：选中分类时的导航回退 */
-.strm-breadcrumb {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12.5px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), .7);
+.strm-queue-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: #10221b38;
+  backdrop-filter: blur(2px);
 }
-.strm-breadcrumb span { min-width: 0; }
-
-/* F8 队列面板（v4）：状态点 + 胶囊统计 + 分组卡片，与顶部统计卡同一语言 */
-.strm-queue {
-  /* body 在媒体库视图是 flex 列容器，下面的 grid-wrap 又是 flex:1；
-     不锁 shrink 的话空间不足时本条会被压成一条细缝（内容裁切） */
-  flex-shrink: 0;
-  margin-bottom: 14px; border-radius: 14px; overflow: hidden;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-}
-.strm-queue-bar {
-  width: 100%; display: flex; align-items: center; gap: 12px;
-  padding: 11px 16px; border: none; cursor: pointer; font-family: inherit;
-  background: transparent;
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
-  transition: background .15s;
-}
-.strm-queue-bar:hover { background: rgba(var(--v-theme-primary, 124, 92, 252), .07); }
-.strm-queue-state {
-  flex-shrink: 0; width: 9px; height: 9px; border-radius: 50%;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .28);
-  transition: background .2s;
-}
-.strm-queue-state.is-busy {
-  background: #EA8A1F;
-  animation: strm-pulse 1s ease-in-out infinite;
-  box-shadow: 0 0 0 4px rgba(234, 138, 31, .15);
-}
-/* 展开时把状态点挪到面板上方做「当前状态」标题色 */
-.strm-queue.is-open .strm-queue-state.is-busy { box-shadow: 0 0 0 5px rgba(234, 138, 31, .20); }
-.strm-queue-bar .strm-task-text { flex-shrink: 0; }
 .strm-queue-panel {
-  padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 14px;
-  border-top: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .08);
+  position: relative;
+  width: min(425px, 100%);
+  background: var(--strm-surface);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -10px 0 50px #00000010;
 }
-.strm-queue-stats { display: flex; gap: 10px; flex-wrap: wrap; }
-.strm-queue-stat {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 14px; border-radius: 11px;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .05);
+.strm-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 25px 23px;
+  border-bottom: 1px solid var(--strm-line);
 }
-.strm-queue-stat i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.strm-queue-stat.is-ok i { background: #16A34A; }
-.strm-queue-stat.is-fail i { background: #E5484D; }
-.strm-queue-stat.is-cancel i { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .35); }
-.strm-queue-stat.is-pend i { background: #EA8A1F; }
-.strm-queue-stat b { font-size: 15px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
-.strm-queue-stat span { font-size: 12px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .65); }
-.strm-queue-sec { display: flex; flex-direction: column; gap: 7px; }
+.strm-drawer-icon {
+  width: 39px;
+  height: 39px;
+  background: var(--strm-tint);
+  color: var(--strm-primary);
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+}
+.strm-drawer-head h2 {
+  font-size: 17px;
+  font-weight: 550;
+}
+.strm-drawer-head p {
+  font-size: 11px;
+  color: var(--strm-muted);
+  margin-top: 3px;
+}
+.strm-drawer-head > button {
+  margin-left: auto;
+}
+.strm-queue-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  padding: 23px;
+  gap: 10px;
+}
+.strm-queue-stats div {
+  background: var(--strm-wash);
+  border-radius: 7px;
+  padding: 12px;
+}
+.strm-queue-stats b {
+  display: block;
+  font-size: 23px;
+  font-weight: 500;
+}
+.strm-queue-stats span {
+  font-size: 10px;
+  color: var(--strm-muted);
+}
+.strm-queue-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 23px;
+  scrollbar-width: thin;
+}
+.strm-queue-sec {
+  margin-bottom: 25px;
+}
 .strm-queue-sec-title {
-  font-size: 11px; font-weight: 600; letter-spacing: .3px;
-  color: rgba(var(--v-theme-on-surface, 27, 29, 41), .5);
+  font-size: 11px;
+  color: var(--strm-muted);
+  display: block;
+  margin-bottom: 10px;
 }
 .strm-queue-item {
-  display: flex; align-items: center; gap: 9px; font-size: 12.5px;
-  padding: 7px 11px; border-radius: 10px;
-  background: rgba(var(--v-theme-on-surface, 27, 29, 41), .04);
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--strm-line);
 }
-.strm-queue-item.is-busy { background: rgba(var(--v-theme-primary, 124, 92, 252), .08); }
-.strm-queue-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.strm-queue-dot.is-busy { background: #EA8A1F; animation: strm-pulse 1s ease-in-out infinite; }
-.strm-queue-dot.is-ok { background: #16A34A; }
-.strm-queue-dot.is-fail { background: #E5484D; }
-.strm-queue-dot.is-pend { background: rgba(var(--v-theme-on-surface, 27, 29, 41), .28); }
-.strm-queue-target { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.strm-queue-kind { flex-shrink: 0; font-size: 11px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .5); }
-.strm-queue-err {
-  flex-shrink: 0; max-width: 200px; font-size: 11px; color: #E5484D;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.strm-queue-item > svg {
+  color: var(--strm-muted);
 }
-.strm-queue-actions { display: flex; gap: 9px; padding-top: 2px; }
-@keyframes strm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-
-/* F10 记录筛选（v4） */
-.strm-rec-filter { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-.strm-rec-filter select,
-.strm-rec-filter input[type="date"] {
-  padding: 7px 12px; border-radius: 11px; font-size: 12.5px; font-family: inherit; cursor: pointer;
-  border: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .14);
-  background: rgb(var(--v-theme-surface, 255, 255, 255));
-  color: rgb(var(--v-theme-on-surface, 27, 29, 41));
-  transition: border-color .15s, box-shadow .15s;
+.strm-queue-item.is-busy > svg {
+  color: var(--strm-primary);
 }
-.strm-rec-filter select:hover,
-.strm-rec-filter input[type="date"]:hover { border-color: rgba(var(--v-theme-primary, 124, 92, 252), .5); }
-.strm-rec-filter select:focus,
-.strm-rec-filter input[type="date"]:focus {
-  outline: none; border-color: rgb(var(--v-theme-primary, 124, 92, 252));
-  box-shadow: 0 0 0 3px rgba(var(--v-theme-primary, 124, 92, 252), .15);
+.strm-queue-item.is-ok > svg {
+  color: #729c81;
 }
-.strm-rec-filter-sep { font-size: 12px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .5); }
-
-/* F11 空态引导 */
-.strm-empty p { margin: 0 0 4px; }
-.strm-empty-hint { font-size: 12px; color: rgba(var(--v-theme-on-surface, 27, 29, 41), .45); }
-.strm-empty .strm-btn, .strm-empty .strm-mini { margin-top: 12px; }
-
-@media (max-width: 900px) {
-  .strm-head, .strm-body { padding-left: 14px; padding-right: 14px; }
-  .strm-rec-time { display: none; }
-  .strm-dhero { min-height: 0; padding: 42px 14px 16px; }
-  .strm-dhero-body { gap: 13px; }
-  .strm-dhero-poster { width: 92px; height: 138px; }
-  .strm-dhero-info h2 { font-size: 20px; letter-spacing: -.3px; }
-  /* 窄屏下主 CTA 落回下一行、占满宽度，不与标题抢横向空间 */
-  .strm-dhero-actions { width: 100%; margin-left: 0; padding-top: 4px; }
-  .strm-dhero-actions .strm-btn { flex: 1; }
-  .strm-row-size { display: none; }
-  /* 窄屏双栏收成单栏：回退整页滚动，侧栏作为内容上方的一条 */
-  .strm-grid-wrap { grid-template-columns: 1fr; }
-  .strm-body.is-grid { display: block; overflow-y: auto; }
-  .strm-body.is-grid .strm-content { overflow: visible; padding-right: 0; }
-  .strm-side {
-    max-height: none;
-    overflow: visible;
-    border-right: none; border-bottom: 1px solid rgba(var(--v-theme-on-surface, 27, 29, 41), .10);
-    border-radius: 12px 12px 0 0;
-    margin-bottom: 14px;
+.strm-queue-item.is-fail > svg {
+  color: #b4776e;
+}
+.strm-queue-item > div {
+  min-width: 0;
+  flex: 1;
+}
+.strm-queue-item b {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.strm-queue-item small {
+  display: block;
+  color: var(--strm-muted);
+  font-size: 10px;
+  margin-top: 3px;
+}
+.strm-queue-actions {
+  display: flex;
+  gap: 9px;
+  padding: 18px 23px;
+  border-top: 1px solid var(--strm-line);
+}
+.strm-queue-actions button {
+  flex: 1;
+}
+.strm-drawer-enter-active,
+.strm-drawer-leave-active {
+  transition: opacity 0.2s;
+}
+.strm-drawer-enter-active .strm-queue-panel,
+.strm-drawer-leave-active .strm-queue-panel {
+  transition: transform 0.2s;
+}
+.strm-drawer-enter-from,
+.strm-drawer-leave-to {
+  opacity: 0;
+}
+.strm-drawer-enter-from .strm-queue-panel,
+.strm-drawer-leave-to .strm-queue-panel {
+  transform: translateX(100%);
+}
+.strm-mobile-nav,
+.strm-mobile-categories {
+  display: none;
+}
+.strm-library-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+@media (max-width: 760px) {
+  .strm-mobile-categories {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--strm-muted);
+    font-size: 10px;
   }
-  .strm-content { padding-left: 0; }
+  .strm-mobile-categories select {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    max-width: 125px;
+    padding: 3px 0;
+  }
+  .strm-mobile-categories select option {
+    background: var(--strm-surface);
+    color: var(--strm-text);
+  }
+}
+@media (max-width: 480px) {
+  .strm-library-meta .strm-updated {
+    display: none;
+  }
+}
+.strm-spinning {
+  animation: strm-spin 1.5s linear infinite;
+}
+@keyframes strm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes strm-shimmer {
+  to {
+    background-position: -220% 0;
+  }
+}
+@media (min-width: 1600px) {
+  .strm-grid,
+  .strm-skel-grid {
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  }
+}
+@media (max-width: 1100px) {
+  .strm-side {
+    width: 198px;
+    flex-basis: 198px;
+    padding-inline: 11px;
+  }
+  .strm-head {
+    padding-inline: 23px;
+  }
+  .strm-body {
+    padding: 25px 23px 0;
+  }
+  .strm-brand strong {
+    font-size: 18px;
+  }
+  .strm-brand small {
+    font-size: 9px;
+  }
+  .strm-brand {
+    gap: 8px;
+    padding-inline: 4px;
+  }
+  .strm-monitor-card small {
+    font-size: 8px;
+  }
+  .strm-dhero-body {
+    flex-wrap: wrap;
+  }
+  .strm-dhero-actions {
+    display: flex;
+    width: 100%;
+    margin-left: 137px;
+  }
+  .strm-detail-foot .strm-foot-right::before {
+    content: '';
+  }
+  .strm-rec-time {
+    min-width: 95px;
+    font-size: 9px;
+  }
+}
+@media (max-width: 820px) {
+  .strm-side {
+    width: 175px;
+    flex-basis: 175px;
+    padding-inline: 8px;
+  }
+  .strm-brand {
+    gap: 6px;
+  }
+  .strm-brand strong {
+    font-size: 15px;
+  }
+  .strm-logo {
+    width: 31px;
+    height: 34px;
+  }
+  .strm-brand small {
+    letter-spacing: 0;
+  }
+  .strm-head {
+    padding-inline: 18px;
+  }
+  .strm-body {
+    padding: 22px 18px 0;
+  }
+  .strm-head-actions {
+    gap: 6px;
+  }
+  .strm-monitor-badge {
+    display: none;
+  }
+  .strm-page-heading h1 {
+    font-size: 24px;
+  }
+  .strm-page-heading p {
+    font-size: 10px;
+  }
+  .strm-stats {
+    gap: 9px;
+  }
+  .strm-stat {
+    padding: 12px;
+  }
+  .strm-stat-number {
+    font-size: 27px;
+  }
+  .strm-stat-bottom {
+    font-size: 9px;
+  }
+  .strm-stat-bottom > svg {
+    display: none;
+  }
+  .strm-workspace {
+    padding: 8px;
+    font-size: 11px;
+  }
+  .strm-workspace small {
+    font-size: 10px;
+  }
+  .strm-monitor-card {
+    padding: 8px 5px;
+    gap: 5px;
+  }
+  .strm-monitor-card small,
+  .strm-side-caption span {
+    display: none;
+  }
+  .strm-rec-top {
+    flex-wrap: wrap;
+  }
+  .strm-rec {
+    gap: 10px;
+    padding: 13px;
+  }
+  .strm-rec-time {
+    min-width: 75px;
+    max-width: 75px;
+  }
+  .strm-toolbar {
+    gap: 8px;
+  }
+  .strm-toolbar-right {
+    gap: 8px;
+  }
+  .strm-search-key {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  .strm-side {
+    display: none;
+  }
+  .strm-head {
+    height: 53px;
+    padding-inline: 16px;
+  }
+  .strm-crumb {
+    font-size: 10px;
+    gap: 6px;
+  }
+  .strm-head-actions {
+    gap: 6px;
+  }
+  .strm-queue-trigger {
+    font-size: 11px !important;
+  }
+  .strm-head-divider {
+    display: none;
+  }
+  .strm-body {
+    padding: 20px 16px 0;
+  }
+  .strm-page-heading {
+    gap: 10px;
+    align-items: flex-start;
+    margin-bottom: 18px;
+  }
+  .strm-page-heading h1 {
+    font-size: 25px;
+  }
+  .strm-page-heading p {
+    max-width: 185px;
+    line-height: 1.6;
+  }
+  .strm-eyebrow {
+    font-size: 6px;
+    letter-spacing: 1.2px;
+  }
+  .strm-page-actions {
+    padding-top: 18px;
+    gap: 6px;
+  }
+  .strm-page-actions > .strm-btn.ghost {
+    padding: 7px;
+    font-size: 0 !important;
+    gap: 0;
+  }
+  .strm-btn {
+    padding: 8px 10px;
+    font-size: 11px !important;
+  }
+  .strm-stats {
+    margin-bottom: 22px;
+    gap: 7px;
+  }
+  .strm-stat {
+    border-radius: 7px;
+    padding: 10px 9px;
+  }
+  .strm-stat-top {
+    font-size: 10px;
+  }
+  .strm-stat-icon {
+    width: 22px;
+    height: 22px;
+  }
+  .strm-stat-icon > svg {
+    width: 15px;
+  }
+  .strm-stat-number {
+    font-size: 26px;
+    margin-top: 6px;
+    margin-bottom: 7px;
+  }
+  .strm-stat-number small {
+    font-size: 8px;
+    margin-left: 4px;
+  }
+  .strm-stat-bottom {
+    font-size: 8px;
+  }
+  .strm-stat-bottom i {
+    display: none;
+  }
+  .strm-grid,
+  .strm-skel-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 19px 13px;
+  }
+  .strm-search-wrap {
+    width: 100%;
+  }
+  .strm-search {
+    font-size: 10px !important;
+  }
+  .strm-toolbar-right {
+    gap: 8px;
+  }
+  .strm-sort > svg {
+    display: none;
+  }
+  .strm-sort select {
+    max-width: 62px;
+    font-size: 10px;
+  }
+  .strm-view-toggle button {
+    width: 25px;
+  }
+  .strm-toolbar {
+    margin-bottom: 16px;
+    gap: 10px;
+  }
+  .strm-updated {
+    font-size: 9px;
+  }
+  .strm-library-title h2 {
+    font-size: 13px;
+  }
+  .strm-card-title {
+    font-size: 12px !important;
+  }
+  .strm-card-sub {
+    font-size: 9px;
+  }
+  .strm-card-go {
+    opacity: 0.6;
+  }
+  .strm-library-foot {
+    font-size: 8px;
+  }
+  .strm-library-foot > span:last-child {
+    display: none;
+  }
+  .strm-mobile-nav {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--strm-line);
+    padding: 10px 16px;
+    background: var(--strm-surface);
+    flex-shrink: 0;
+  }
+  .strm-mobile-nav button {
+    white-space: nowrap;
+    font-size: 11px !important;
+    border: 0;
+    background: transparent;
+    padding: 5px 9px;
+    border-radius: 5px;
+    color: var(--strm-muted);
+  }
+  .strm-mobile-nav button.active {
+    color: var(--strm-primary);
+    background: var(--strm-tint);
+  }
+  .strm-dhero {
+    padding: 15px;
+  }
+  .strm-dhero-body {
+    align-items: flex-start;
+    gap: 15px;
+    flex-wrap: wrap;
+  }
+  .strm-dhero-poster {
+    width: 75px;
+  }
+  .strm-dhero-info h2 {
+    font-size: 20px;
+  }
+  .strm-dhero-times {
+    gap: 4px;
+    font-size: 9px;
+    margin-top: 10px;
+  }
+  .strm-dhero-times .strm-sep {
+    display: none;
+  }
+  .strm-dhero-times > span {
+    display: block;
+    width: 100%;
+  }
+  .strm-dhero-actions {
+    display: flex;
+    width: 100%;
+    margin: 0;
+  }
+  .strm-row {
+    gap: 9px;
+    padding: 12px 10px;
+  }
+  .strm-row-name {
+    font-size: 10px;
+  }
+  .strm-row-size {
+    display: none;
+  }
+  .strm-row-state {
+    font-size: 9px;
+    width: 42px;
+  }
+  .strm-row-no {
+    width: 22px;
+    font-size: 9px;
+  }
+  .strm-row-no.is-plain {
+    width: 40px;
+  }
+  .strm-row-go {
+    font-size: 9px !important;
+    padding: 3px 5px;
+  }
+  .strm-rec-head {
+    flex-wrap: wrap;
+  }
+  .strm-rec-count {
+    font-size: 15px;
+  }
+  .strm-rec {
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .strm-rec-main {
+    flex-basis: calc(100% - 25px);
+  }
+  .strm-rec-title {
+    font-size: 11px;
+  }
+  .strm-rec-time {
+    max-width: initial;
+    margin-left: auto;
+  }
+  .strm-rec-badge {
+    margin-left: 15px;
+  }
+  .strm-grid.is-list .strm-card {
+    padding: 10px;
+    gap: 10px;
+  }
+  .strm-list-card-meta small {
+    display: none;
+  }
+  .strm-grid.is-list .strm-card-title {
+    font-size: 12px !important;
+  }
+  .strm-list-card-meta .strm-tag {
+    font-size: 8px;
+    padding: 2px 4px;
+  }
+  .strm-card-path {
+    font-size: 8px;
+  }
+}
+/* 短窗口优先让出海报空间，避免首行封面被固定统计区截断。 */
+@media (max-height: 820px) {
+  .strm-body {
+    padding-top: 19px;
+  }
+  .strm-page-heading {
+    margin-bottom: 18px;
+  }
+  .strm-page-heading h1 {
+    line-height: 1.25;
+    font-size: 25px;
+  }
+  .strm-eyebrow {
+    font-size: 7px;
+    margin-bottom: 4px;
+  }
+  .strm-page-heading p {
+    margin-top: 4px;
+  }
+  .strm-page-actions {
+    padding-top: 12px;
+  }
+  .strm-stats {
+    margin-bottom: 21px;
+  }
+  .strm-stat {
+    padding: 11px 15px 12px;
+  }
+  .strm-stat-number {
+    font-size: 29px;
+    margin: 1px 0 0;
+    line-height: 1.15;
+  }
+  .strm-stat-icon {
+    width: 24px;
+    height: 24px;
+  }
+  .strm-stat-bottom {
+    display: none;
+  }
+  .strm-library-bar {
+    margin-bottom: 10px;
+  }
+  .strm-toolbar {
+    margin-bottom: 15px;
+  }
+  .strm-library-foot {
+    padding: 10px 0;
+  }
+}
+@media (max-width: 760px) and (max-height: 820px) {
+  .strm-stat {
+    padding: 10px;
+  }
+  .strm-eyebrow {
+    display: none;
+  }
+  .strm-page-actions {
+    padding-top: 9px;
+  }
+  .strm-page-heading p {
+    max-width: 215px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .strm *,
+  .strm *::before,
+  .strm *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 </style>

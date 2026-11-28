@@ -42,7 +42,9 @@ function coverUrl(api, pluginId, item) {
   const base = apiBase(api);
   const path = encodeURIComponent(item?.path || '');
   const type = item?.type || '';
-  return `${base}/plugin/${pluginId}/cover?path=${path}&type=${type}`
+  // 刮削后海报可能被替换，使用元数据变更时间避开旧图片的长缓存。
+  const revision = encodeURIComponent(item?.last_scrape || item?.last_file_change || 0);
+  return `${base}/plugin/${pluginId}/cover?path=${path}&type=${type}&v=${revision}`
 }
 
 function hashOf(text) {
